@@ -1,0 +1,546 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		8DE541D72D919CD10015BF48 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 8DE541BD2D919CCF0015BF48 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8DE541C42D919CCF0015BF48;
+			remoteInfo = WhisperServer;
+		};
+		8DE541E12D919CD10015BF48 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 8DE541BD2D919CCF0015BF48 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8DE541C42D919CCF0015BF48;
+			remoteInfo = WhisperServer;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		8DE541C52D919CCF0015BF48 /* WhisperServer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WhisperServer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8DE541D62D919CD10015BF48 /* WhisperServerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WhisperServerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		8DE541E02D919CD10015BF48 /* WhisperServerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WhisperServerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		8DE541C72D919CCF0015BF48 /* WhisperServer */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WhisperServer;
+			sourceTree = "<group>";
+		};
+		8DE541D92D919CD10015BF48 /* WhisperServerTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WhisperServerTests;
+			sourceTree = "<group>";
+		};
+		8DE541E32D919CD10015BF48 /* WhisperServerUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WhisperServerUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		8DE541C22D919CCF0015BF48 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8DE541D32D919CD10015BF48 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8DE541DD2D919CD10015BF48 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		8DE541BC2D919CCF0015BF48 = {
+			isa = PBXGroup;
+			children = (
+				8DE541C72D919CCF0015BF48 /* WhisperServer */,
+				8DE541D92D919CD10015BF48 /* WhisperServerTests */,
+				8DE541E32D919CD10015BF48 /* WhisperServerUITests */,
+				8DE541C62D919CCF0015BF48 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		8DE541C62D919CCF0015BF48 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8DE541C52D919CCF0015BF48 /* WhisperServer.app */,
+				8DE541D62D919CD10015BF48 /* WhisperServerTests.xctest */,
+				8DE541E02D919CD10015BF48 /* WhisperServerUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		8DE541C42D919CCF0015BF48 /* WhisperServer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8DE541EA2D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServer" */;
+			buildPhases = (
+				8DE541C12D919CCF0015BF48 /* Sources */,
+				8DE541C22D919CCF0015BF48 /* Frameworks */,
+				8DE541C32D919CCF0015BF48 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				8DE541C72D919CCF0015BF48 /* WhisperServer */,
+			);
+			name = WhisperServer;
+			packageProductDependencies = (
+			);
+			productName = WhisperServer;
+			productReference = 8DE541C52D919CCF0015BF48 /* WhisperServer.app */;
+			productType = "com.apple.product-type.application";
+		};
+		8DE541D52D919CD10015BF48 /* WhisperServerTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8DE541ED2D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServerTests" */;
+			buildPhases = (
+				8DE541D22D919CD10015BF48 /* Sources */,
+				8DE541D32D919CD10015BF48 /* Frameworks */,
+				8DE541D42D919CD10015BF48 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				8DE541D82D919CD10015BF48 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				8DE541D92D919CD10015BF48 /* WhisperServerTests */,
+			);
+			name = WhisperServerTests;
+			packageProductDependencies = (
+			);
+			productName = WhisperServerTests;
+			productReference = 8DE541D62D919CD10015BF48 /* WhisperServerTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		8DE541DF2D919CD10015BF48 /* WhisperServerUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8DE541F02D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServerUITests" */;
+			buildPhases = (
+				8DE541DC2D919CD10015BF48 /* Sources */,
+				8DE541DD2D919CD10015BF48 /* Frameworks */,
+				8DE541DE2D919CD10015BF48 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				8DE541E22D919CD10015BF48 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				8DE541E32D919CD10015BF48 /* WhisperServerUITests */,
+			);
+			name = WhisperServerUITests;
+			packageProductDependencies = (
+			);
+			productName = WhisperServerUITests;
+			productReference = 8DE541E02D919CD10015BF48 /* WhisperServerUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		8DE541BD2D919CCF0015BF48 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1620;
+				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					8DE541C42D919CCF0015BF48 = {
+						CreatedOnToolsVersion = 16.2;
+					};
+					8DE541D52D919CD10015BF48 = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 8DE541C42D919CCF0015BF48;
+					};
+					8DE541DF2D919CD10015BF48 = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 8DE541C42D919CCF0015BF48;
+					};
+				};
+			};
+			buildConfigurationList = 8DE541C02D919CCF0015BF48 /* Build configuration list for PBXProject "WhisperServer" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 8DE541BC2D919CCF0015BF48;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 8DE541C62D919CCF0015BF48 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				8DE541C42D919CCF0015BF48 /* WhisperServer */,
+				8DE541D52D919CD10015BF48 /* WhisperServerTests */,
+				8DE541DF2D919CD10015BF48 /* WhisperServerUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		8DE541C32D919CCF0015BF48 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8DE541D42D919CD10015BF48 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8DE541DE2D919CD10015BF48 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8DE541C12D919CCF0015BF48 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8DE541D22D919CD10015BF48 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8DE541DC2D919CD10015BF48 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		8DE541D82D919CD10015BF48 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8DE541C42D919CCF0015BF48 /* WhisperServer */;
+			targetProxy = 8DE541D72D919CD10015BF48 /* PBXContainerItemProxy */;
+		};
+		8DE541E22D919CD10015BF48 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8DE541C42D919CCF0015BF48 /* WhisperServer */;
+			targetProxy = 8DE541E12D919CD10015BF48 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		8DE541E82D919CD10015BF48 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.2;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		8DE541E92D919CD10015BF48 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.2;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		8DE541EB2D919CD10015BF48 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = WhisperServer/WhisperServer.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"WhisperServer/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = pfrankov.WhisperServer;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		8DE541EC2D919CD10015BF48 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = WhisperServer/WhisperServer.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"WhisperServer/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = pfrankov.WhisperServer;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		8DE541EE2D919CD10015BF48 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = pfrankov.WhisperServerTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/WhisperServer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/WhisperServer";
+			};
+			name = Debug;
+		};
+		8DE541EF2D919CD10015BF48 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = pfrankov.WhisperServerTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/WhisperServer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/WhisperServer";
+			};
+			name = Release;
+		};
+		8DE541F12D919CD10015BF48 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = pfrankov.WhisperServerUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = WhisperServer;
+			};
+			name = Debug;
+		};
+		8DE541F22D919CD10015BF48 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = pfrankov.WhisperServerUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = WhisperServer;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		8DE541C02D919CCF0015BF48 /* Build configuration list for PBXProject "WhisperServer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8DE541E82D919CD10015BF48 /* Debug */,
+				8DE541E92D919CD10015BF48 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8DE541EA2D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8DE541EB2D919CD10015BF48 /* Debug */,
+				8DE541EC2D919CD10015BF48 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8DE541ED2D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServerTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8DE541EE2D919CD10015BF48 /* Debug */,
+				8DE541EF2D919CD10015BF48 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8DE541F02D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServerUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8DE541F12D919CD10015BF48 /* Debug */,
+				8DE541F22D919CD10015BF48 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 8DE541BD2D919CCF0015BF48 /* Project object */;
+}
