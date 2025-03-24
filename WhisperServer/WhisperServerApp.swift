@@ -66,8 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "Server")
-            button.toolTip = "WhisperServer: HTTP Server on port \(serverPort)"
+            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Whisper Server")
+            button.toolTip = "WhisperServer: Whisper API Server on port \(serverPort)"
         }
     }
     
@@ -79,6 +79,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let statusItem = NSMenuItem(title: "Server: \(serverStatus)", action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // API endpoints info
+        let apiInfoItem = NSMenuItem(title: "API Endpoint", action: nil, keyEquivalent: "")
+        apiInfoItem.isEnabled = false
+        menu.addItem(apiInfoItem)
+        
+        // Transcription endpoint
+        let transcriptionEndpoint = NSMenuItem(title: "   /v1/audio/transcriptions", action: #selector(copyTranscriptionURL), keyEquivalent: "")
+        menu.addItem(transcriptionEndpoint)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // Sample command
+        let sampleCommandItem = NSMenuItem(title: "Copy sample curl command", action: #selector(copySampleCommand), keyEquivalent: "")
+        menu.addItem(sampleCommandItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // Documentation
+        let docsItem = NSMenuItem(title: "Documentation", action: #selector(openDocs), keyEquivalent: "")
+        menu.addItem(docsItem)
         
         menu.addItem(NSMenuItem.separator())
         
@@ -113,7 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Update status after a delay to allow server to initialize
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self = self else { return }
-            self.serverStatus = "Running on port \(self.serverPort)"
+            self.serverStatus = "Running on port \(self.serverPort) (Whisper API)"
         }
     }
     
@@ -123,7 +146,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         httpServer = nil
     }
     
-    // MARK: - Action Method
+    // MARK: - Action Methods
+    
+    /// Copies the transcription endpoint URL to clipboard
+    @objc private func copyTranscriptionURL() {
+        let url = "http://localhost:\(serverPort)/v1/audio/transcriptions"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url, forType: .string)
+    }
+    
+    /// Copies a sample curl command to clipboard
+    @objc private func copySampleCommand() {
+        let command = """
+        curl -X POST http://localhost:\(serverPort)/v1/audio/transcriptions \\
+          -F file=@/path/to/audio.mp3 \\
+          -F model=whisper-1 \\
+          -F response_format=json
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+    }
+    
+    /// Opens documentation URL
+    @objc private func openDocs() {
+        if let url = URL(string: "https://platform.openai.com/docs/api-reference/audio") {
+            NSWorkspace.shared.open(url)
+        }
+    }
     
     /// Quits the application
     @objc private func quitClicked() {
