@@ -19,7 +19,7 @@ struct WhisperServerApp: App {
 }
 
 /// Application delegate that manages the HTTP server and menu bar integration
-final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Properties
     
     /// Menu bar item
@@ -28,25 +28,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// HTTP server instance
     private var httpServer: SimpleHTTPServer?
     
-    /// Current server status displayed in the menu
-    @objc private var serverStatus: String = "Starting..." {
-        didSet {
-            updateMenu()
-        }
-    }
-    
-    // MARK: - Constants
-    
     /// The port the server listens on
     private let serverPort: UInt16 = 8888
     
     // MARK: - Application Lifecycle
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        configureApplication()
+        // Make app appear only in menu bar (no dock icon)
+        NSApp.setActivationPolicy(.accessory)
+        
+        // Setup UI
         setupStatusItem()
-        setupMenu()
-        startServerWithDelay()
+        
+        // Start server
+        startServer()
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -55,66 +50,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     
     // MARK: - Private Methods
     
-    /// Configures the application's appearance and behavior
-    private func configureApplication() {
-        // Make app appear only in menu bar (no dock icon)
-        NSApp.setActivationPolicy(.accessory)
-    }
-    
     /// Sets up the status item in the menu bar
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Whisper Server")
-            button.toolTip = "WhisperServer: Whisper API Server on port \(serverPort)"
+            button.toolTip = "WhisperServer running on port \(serverPort)"
         }
-    }
-    
-    /// Creates and configures the menu
-    private func setupMenu() {
+        
         let menu = NSMenu()
-        
-        // Server status item
-        let statusItem = NSMenuItem(title: "Server: \(serverStatus)", action: nil, keyEquivalent: "")
-        statusItem.isEnabled = false
-        menu.addItem(statusItem)
-        
+        menu.addItem(withTitle: "Server running on port \(serverPort)", action: nil, keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         
-        // Quit menu item
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitClicked), keyEquivalent: "q"))
-        
-        self.statusItem.menu = menu
-    }
-    
-    /// Updates the menu with the current server status
-    private func updateMenu() {
-        if let menu = statusItem.menu, let item = menu.item(at: 0) {
-            item.title = "Server: \(serverStatus)"
-        }
-    }
-    
-    /// Starts the server with a short delay to ensure app initialization is complete
-    private func startServerWithDelay() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.startServer()
-        }
+        statusItem.menu = menu
     }
     
     /// Starts the HTTP server
     private func startServer() {
-        serverStatus = "Starting..."
-        
-        // Create and start the HTTP server
         httpServer = SimpleHTTPServer(port: serverPort)
         httpServer?.start()
-        
-        // Update status after a delay to allow server to initialize
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self = self else { return }
-            self.serverStatus = "Running on port \(self.serverPort) (Whisper API)"
-        }
     }
     
     /// Stops the HTTP server
@@ -123,10 +79,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         httpServer = nil
     }
     
-    // MARK: - Action Methods
+    // MARK: - Actions
     
-    /// Quits the application
-    @objc private func quitClicked() {
+    @objc private func quitApp() {
         NSApp.terminate(self)
     }
 }

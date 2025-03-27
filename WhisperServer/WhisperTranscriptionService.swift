@@ -34,81 +34,71 @@ struct WhisperTranscriptionService {
             whisper_free(context)
         }
         
-        do {
-            // Configure parameters
-            var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
-            params.print_realtime = false
-            params.print_progress = false
-            params.print_timestamps = false
-            params.print_special = false
-            params.translate = false
-            params.no_context = true
-            params.single_segment = false
-            
-            // Set language if specified
-            if let language = language {
-                language.withCString { lang in
-                    params.language = lang
-                }
+        // Configure parameters
+        var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
+        params.print_realtime = false
+        params.print_progress = false
+        params.print_timestamps = false
+        params.print_special = false
+        params.translate = false
+        params.no_context = true
+        params.single_segment = false
+        
+        // Set language if specified
+        if let language = language {
+            language.withCString { lang in
+                params.language = lang
             }
-            
-            // Set prompt if specified
-            if let prompt = prompt {
-                prompt.withCString { p in
-                    params.initial_prompt = p
-                }
+        }
+        
+        // Set prompt if specified
+        if let prompt = prompt {
+            prompt.withCString { p in
+                params.initial_prompt = p
             }
-            
-            params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
-            
-            // Convert audio to format for Whisper
-            let samples = convertWavToSamples(audioData)
-            
-            // Start transcription
-            var result: Int32 = -1
-            samples.withUnsafeBufferPointer { samples in
-                result = whisper_full(context, params, samples.baseAddress, Int32(samples.count))
-            }
-            
-            if result != 0 {
-                print("❌ Error during transcription execution")
-                return nil
-            }
-            
-            // Collect results
-            let numSegments = whisper_full_n_segments(context)
-            var transcription = ""
-            
-            for i in 0..<numSegments {
-                transcription += String(cString: whisper_full_get_segment_text(context, i))
-            }
-            
-            return transcription
-            
-        } catch {
-            print("❌ An error occurred during audio processing: \(error.localizedDescription)")
+        }
+        
+        params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
+        
+        // Convert audio to samples for Whisper
+        let samples = convertAudioToSamples(audioData)
+        
+        // Start transcription
+        var result: Int32 = -1
+        samples.withUnsafeBufferPointer { samples in
+            result = whisper_full(context, params, samples.baseAddress, Int32(samples.count))
+        }
+        
+        if result != 0 {
+            print("❌ Error during transcription execution")
             return nil
         }
+        
+        // Collect results
+        let numSegments = whisper_full_n_segments(context)
+        var transcription = ""
+        
+        for i in 0..<numSegments {
+            transcription += String(cString: whisper_full_get_segment_text(context, i))
+        }
+        
+        return transcription
     }
     
     /// Searches for a file in application resources
     private static func findResourceFile(named filename: String, inSubdirectory subdirectory: String? = nil) -> URL? {
-        // File name and extension
         let components = filename.split(separator: ".")
         let name = String(components.first ?? "")
         let ext = components.count > 1 ? String(components.last!) : nil
         
-        // Search in bundle resources
+        // First try bundle resources with subdirectory
         if let url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: subdirectory) {
             return url
         }
         
-        // Search in resource directory
+        // Then try direct path in resources
         if let resourceURL = Bundle.main.resourceURL {
-            var resourcePath = resourceURL
-            if let subdirectory = subdirectory {
-                resourcePath = resourcePath.appendingPathComponent(subdirectory)
-            }
+            let resourcePath = subdirectory != nil ? resourceURL.appendingPathComponent(subdirectory!) : resourceURL
             let fileURL = resourcePath.appendingPathComponent(filename)
             if FileManager.default.fileExists(atPath: fileURL.path) {
                 return fileURL
@@ -119,8 +109,7 @@ struct WhisperTranscriptionService {
     }
     
     /// Converts audio data to sample array for Whisper
-    /// Supports WAV format and performs basic audio format validation
-    private static func convertWavToSamples(_ audioData: Data) -> [Float] {
+    private static func convertAudioToSamples(_ audioData: Data) -> [Float] {
         // Check WAV header (RIFF)
         let isWav = audioData.count > 12 && 
                     audioData[0] == 0x52 && // R
@@ -133,26 +122,28 @@ struct WhisperTranscriptionService {
             return convertWavDataToSamples(audioData)
         } else {
             print("⚠️ Unknown audio format, attempting to interpret as raw PCM")
-            // For non-WAV audio, can try to interpret as raw PCM
-            // This may work if the data is already in the correct format
+            // Simplified fallback - assume 16-bit PCM with no header
             return convertRawPCMToSamples(audioData)
         }
     }
     
     /// Converts WAV data to sample array
     private static func convertWavDataToSamples(_ audioData: Data) -> [Float] {
-        return audioData.withUnsafeBytes { bufferPtr -> [Float] in
+        return audioData.withUnsafeBytes { rawBufferPointer -> [Float] in
             let header = 44 // Standard WAV header size
             let bytesPerSample = 2 // 16-bit PCM
             
-            // Check if there's enough data
             guard audioData.count > header + bytesPerSample else {
                 print("❌ WAV file too short")
                 return []
             }
             
-            let dataPtr = bufferPtr.baseAddress!.advanced(by: header)
-            let int16Ptr = dataPtr.bindMemory(to: Int16.self, capacity: (audioData.count - header) / bytesPerSample)
+            guard let baseAddress = rawBufferPointer.baseAddress else {
+                return []
+            }
+            
+            let dataPtr = baseAddress.advanced(by: header)
+            let int16Ptr = dataPtr.assumingMemoryBound(to: Int16.self)
             
             let numSamples = (audioData.count - header) / bytesPerSample
             var samples = [Float](repeating: 0, count: numSamples)
@@ -165,28 +156,19 @@ struct WhisperTranscriptionService {
         }
     }
     
-    /// Attempts to interpret arbitrary audio data as raw PCM
+    /// Interprets audio data as raw PCM
     private static func convertRawPCMToSamples(_ audioData: Data) -> [Float] {
-        return audioData.withUnsafeBytes { bufferPtr -> [Float] in
+        return audioData.withUnsafeBytes { rawBufferPointer -> [Float] in
             let bytesPerSample = 2 // Assume 16-bit PCM
-            
-            // Skip some initial bytes that may contain metadata
-            // This is a heuristic, may need adjustment for different formats
-            let assumedHeaderSize = min(1024, audioData.count / 2) // Skip first 1024 bytes or half the file
-            
-            guard audioData.count > assumedHeaderSize + bytesPerSample else {
-                print("❌ Audio file too short")
-                return []
-            }
-            
-            let dataPtr = bufferPtr.baseAddress!.advanced(by: assumedHeaderSize)
-            let int16Ptr = dataPtr.bindMemory(to: Int16.self, capacity: (audioData.count - assumedHeaderSize) / bytesPerSample)
-            
-            let numSamples = (audioData.count - assumedHeaderSize) / bytesPerSample
+            let numSamples = audioData.count / bytesPerSample
             var samples = [Float](repeating: 0, count: numSamples)
             
-            for i in 0..<numSamples {
-                samples[i] = Float(int16Ptr[i]) / 32768.0
+            if let baseAddress = rawBufferPointer.baseAddress {
+                let int16Ptr = baseAddress.assumingMemoryBound(to: Int16.self)
+                
+                for i in 0..<numSamples {
+                    samples[i] = Float(int16Ptr[i]) / 32768.0
+                }
             }
             
             return samples
