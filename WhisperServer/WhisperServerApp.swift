@@ -161,7 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         curl -X POST http://localhost:\(serverPort)/v1/audio/transcriptions \\
           -F file=@/path/to/audio.mp3 \\
           -F model=whisper-1 \\
-          -F response_format=json
+          -F response_format=json \\
+          -F language=en \\
+          -F prompt="Transcript the following audio:"
         """
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
