@@ -1,82 +1,8 @@
 import Foundation
 import whisper
 
-/// Класс для тестирования функциональности whisper.cpp
-class WhisperTester {
-    
-    /// Выполняет транскрипцию аудиофайла и возвращает результат
-    /// - Returns: Строка с результатом транскрипции или nil в случае ошибки
-    static func transcribe() -> String? {
-        let modelFilename = "ggml-base.en.bin"
-        let audioFilename = "jfk.wav"
-        
-        // Находим необходимые файлы
-        guard let modelURL = findResourceFile(named: modelFilename, inSubdirectory: "models"),
-              let audioURL = findResourceFile(named: audioFilename) else {
-            return nil
-        }
-        
-        // Инициализируем контекст Whisper
-        var contextParams = whisper_context_default_params()
-        #if os(macOS) || os(iOS)
-        contextParams.use_gpu = true
-        #endif
-        
-        guard let context = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
-            return nil
-        }
-        
-        defer {
-            whisper_free(context)
-        }
-        
-        // Выполняем распознавание речи
-        do {
-            let audioData = try Data(contentsOf: audioURL)
-            
-            // Настраиваем параметры
-            var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
-            params.print_realtime = false
-            params.print_progress = false
-            params.print_timestamps = false
-            params.print_special = false
-            params.translate = false
-            params.no_context = true
-            params.single_segment = false
-            
-            "en".withCString { en in
-                params.language = en
-            }
-            
-            params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
-            
-            // Преобразуем аудио в формат для Whisper
-            let samples = convertWavToSamples(audioData)
-            
-            // Запускаем транскрипцию
-            var result: Int32 = -1
-            samples.withUnsafeBufferPointer { samples in
-                result = whisper_full(context, params, samples.baseAddress, Int32(samples.count))
-            }
-            
-            if result != 0 {
-                return nil
-            }
-            
-            // Собираем результаты
-            let numSegments = whisper_full_n_segments(context)
-            var transcription = ""
-            
-            for i in 0..<numSegments {
-                transcription += String(cString: whisper_full_get_segment_text(context, i))
-            }
-            
-            return transcription
-            
-        } catch {
-            return nil
-        }
-    }
+/// Сервис транскрипции аудио с использованием whisper.cpp
+struct WhisperTranscriptionService {
     
     /// Выполняет транскрипцию аудиоданных, полученных из HTTP-запроса, и возвращает результат
     /// - Parameters:
@@ -266,4 +192,4 @@ class WhisperTester {
             return samples
         }
     }
-} 
+}

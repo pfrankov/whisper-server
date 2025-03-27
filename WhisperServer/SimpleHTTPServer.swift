@@ -505,9 +505,9 @@ final class SimpleHTTPServer {
                     print("⚠️ Странно, но аудиоданные стали nil, хотя проверка isValid была пройдена")
                 }
                 
-                // Используем наш класс WhisperTester для транскрипции
+                // Используем наш сервис транскрипции для обработки аудио
                 print("🔄 Запускаем процесс транскрипции...")
-                let transcription = WhisperTester.transcribeAudioData(
+                let transcription = WhisperTranscriptionService.transcribeAudioData(
                     whisperRequest.audioData!,
                     language: whisperRequest.language,
                     prompt: whisperRequest.prompt
