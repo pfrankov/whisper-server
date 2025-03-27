@@ -8,11 +8,11 @@
 import Foundation
 import Network
 
-/// HTTP сервер для обработки Whisper API запросов
+/// HTTP server for processing Whisper API requests
 final class SimpleHTTPServer {
     // MARK: - Types
     
-    /// Форматы ответов API
+    /// API response formats
     private enum ResponseFormat: String {
         case json, text, srt, vtt, verbose_json
         
@@ -22,7 +22,7 @@ final class SimpleHTTPServer {
         }
     }
     
-    /// Структура запроса Whisper API
+    /// Whisper API request structure
     private struct WhisperAPIRequest {
         var audioData: Data?
         var prompt: String?
@@ -37,22 +37,22 @@ final class SimpleHTTPServer {
     
     // MARK: - Properties
     
-    /// Порт, на котором слушает сервер
+    /// Port on which the server listens
     private let port: UInt16
     
-    /// Флаг, показывающий, запущен ли сервер
+    /// Flag indicating whether the server is running
     private(set) var isRunning = false
     
-    /// Сетевой слушатель для приема входящих соединений
+    /// Network listener for accepting incoming connections
     private var listener: NWListener?
     
-    /// Очередь для обработки операций сервера
+    /// Queue for processing server operations
     private let serverQueue = DispatchQueue(label: "com.whisperserver.server", qos: .userInitiated)
     
     // MARK: - Initialization
     
-    /// Создает новый экземпляр HTTP-сервера
-    /// - Parameter port: Порт, на котором слушать соединения
+    /// Creates a new instance of HTTP server
+    /// - Parameter port: Port to listen for connections
     init(port: UInt16) {
         self.port = port
     }
@@ -63,72 +63,72 @@ final class SimpleHTTPServer {
     
     // MARK: - Public Methods
     
-    /// Запускает HTTP-сервер
+    /// Starts the HTTP server
     func start() {
         guard !isRunning else { return }
         
-        // Устанавливаем флаг попыток запуска
+        // Setting up retry attempts
         let maxRetries = 3
         var retryCount = 0
         var lastError: Error?
         
         func tryStartServer() {
             do {
-                // Создаем TCP параметры
+                // Create TCP parameters
                 let parameters = NWParameters.tcp
                 
-                // Устанавливаем таймаут для соединений
-                parameters.allowLocalEndpointReuse = true  // Это позволит переиспользовать порт быстрее, если он был недавно закрыт
-                parameters.requiredInterfaceType = .loopback  // Слушаем только локальные соединения
+                // Set timeout for connections
+                parameters.allowLocalEndpointReuse = true  // This allows the port to be reused faster if it was recently closed
+                parameters.requiredInterfaceType = .loopback  // Listen only for local connections
                 
-                // Создаем порт из UInt16
+                // Create port from UInt16
                 let port = NWEndpoint.Port(rawValue: self.port)!
                 
-                // Инициализируем слушатель с параметрами и портом
+                // Initialize listener with parameters and port
                 listener = try NWListener(using: parameters, on: port)
                 
-                // Настраиваем обработчики
+                // Configure handlers
                 configureStateHandler()
                 configureConnectionHandler()
                 
-                // Начинаем слушать соединения
+                // Start listening for connections
                 listener?.start(queue: serverQueue)
                 
             } catch {
                 lastError = error
-                print("❌ Не удалось создать HTTP-сервер: \(error.localizedDescription)")
+                print("❌ Failed to create HTTP server: \(error.localizedDescription)")
                 
-                // Пробуем перезапустить с задержкой, если не превышено максимальное число попыток
+                // Try to restart with a delay if maximum number of attempts is not exceeded
                 if retryCount < maxRetries {
                     retryCount += 1
-                    print("🔄 Повторная попытка запуска сервера (\(retryCount)/\(maxRetries)) через 2 секунды...")
+                    print("🔄 Retry attempt to start server (\(retryCount)/\(maxRetries)) in 2 seconds...")
                     
                     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                         tryStartServer()
                     }
                 } else {
-                    print("❌ Не удалось запустить сервер после \(maxRetries) попыток: \(error.localizedDescription)")
+                    print("❌ Failed to start server after \(maxRetries) attempts: \(error.localizedDescription)")
                 }
             }
         }
         
-        // Запускаем первую попытку
+        // Launch first attempt
         tryStartServer()
     }
     
-    /// Останавливает HTTP-сервер
+    /// Stops the HTTP server
     func stop() {
         guard isRunning else { return }
         
         isRunning = false
         listener?.cancel()
         listener = nil
-        print("🛑 HTTP-сервер остановлен")
+        print("🛑 HTTP server stopped")
     }
     
-    // MARK: - Настройка слушателя
+    // MARK: - Listener Configuration
     
-    /// Настраивает обработчик состояния для слушателя
+    /// Configures state handler for the listener
     private func configureStateHandler() {
         listener?.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
@@ -136,11 +136,11 @@ final class SimpleHTTPServer {
             switch state {
             case .ready:
                 self.isRunning = true
-                print("✅ HTTP-сервер запущен на http://localhost:\(self.port)")
-                print("   Whisper API доступен по адресу: http://localhost:\(self.port)/v1/audio/transcriptions")
+                print("✅ HTTP server started on http://localhost:\(self.port)")
+                print("   Whisper API available at: http://localhost:\(self.port)/v1/audio/transcriptions")
                 
             case .failed(let error):
-                print("❌ HTTP-сервер завершился с ошибкой: \(error.localizedDescription)")
+                print("❌ HTTP server terminated with error: \(error.localizedDescription)")
                 self.stop()
                 
             case .cancelled:
@@ -152,7 +152,7 @@ final class SimpleHTTPServer {
         }
     }
     
-    /// Настраивает обработчик новых соединений
+    /// Configures handler for new connections
     private func configureConnectionHandler() {
         listener?.newConnectionHandler = { [weak self] connection in
             guard let self = self else { return }
@@ -160,152 +160,152 @@ final class SimpleHTTPServer {
         }
     }
     
-    // MARK: - Обработка соединений
+    // MARK: - Connection Handling
     
-    /// Обрабатывает входящее сетевое соединение
-    /// - Parameter connection: Новое сетевое соединение
+    /// Handles an incoming network connection
+    /// - Parameter connection: New network connection
     private func handleConnection(_ connection: NWConnection) {
-        print("📥 Получено новое соединение")
+        print("📥 Received new connection")
         
-        // Максимальный размер запроса (50 МБ для больших аудиофайлов)
+        // Maximum request size (50 MB for large audio files)
         let maxRequestSize = 50 * 1024 * 1024
         
-        // Стартуем соединение
+        // Start the connection
         connection.start(queue: serverQueue)
         
-        // Настраиваем обработчик получения данных
+        // Configure data reception handler
         connection.receive(minimumIncompleteLength: 1, maximumLength: maxRequestSize) { [weak self] data, _, isComplete, error in
             guard let self = self else { return }
             
-            // Удаляем преждевременное закрытие соединения 
+            // Remove premature connection closing
             // defer {
             //     connection.cancel()
             // }
             
-            // Обработка ошибок
+            // Error handling
             if let error = error {
-                print("❌ Ошибка при получении данных: \(error.localizedDescription)")
+                print("❌ Error receiving data: \(error.localizedDescription)")
                 connection.cancel()
                 return
             }
             
-            // Проверка наличия данных
+            // Check for data presence
             guard let data = data, !data.isEmpty else {
-                print("⚠️ Получены пустые данные")
+                print("⚠️ Received empty data")
                 self.sendDefaultResponse(to: connection)
                 return
             }
             
-            print("📥 Получено \(data.count) байт данных")
+            print("📥 Received \(data.count) bytes of data")
             
-            // Проверка размера запроса
+            // Check request size
             if data.count > maxRequestSize {
-                print("⚠️ Превышен максимальный размер запроса (\(maxRequestSize / 1024 / 1024) MB)")
-                self.sendErrorResponse(to: connection, message: "Запрос слишком большой")
+                print("⚠️ Exceeded maximum request size (\(maxRequestSize / 1024 / 1024) MB)")
+                self.sendErrorResponse(to: connection, message: "Request too large")
                 return
             }
             
-            // Обработка HTTP-запроса
+            // Process HTTP request
             if let request = self.parseHTTPRequest(data: data) {
                 self.routeRequest(connection: connection, request: request)
             } else {
-                print("⚠️ Не удалось распарсить HTTP-запрос")
+                print("⚠️ Failed to parse HTTP request")
                 self.sendDefaultResponse(to: connection)
             }
         }
     }
     
-    // MARK: - Обработка HTTP-запросов
+    // MARK: - Process HTTP Requests
     
-    /// Разбирает данные HTTP-запроса
-    /// - Parameter data: Необработанные данные запроса
-    /// - Returns: Словарь с компонентами запроса или nil, если разбор не удался
+    /// Parses HTTP request data
+    /// - Parameter data: Unprocessed request data
+    /// - Returns: Dictionary with request components or nil if parsing failed
     private func parseHTTPRequest(data: Data) -> [String: Any]? {
-        print("🔍 Получен HTTP-запрос размером \(data.count) байт")
+        print("🔍 Received HTTP request of size \(data.count) bytes")
         
-        // Ищем разделитель между заголовками и телом (двойной CRLF: \r\n\r\n)
-        let doubleCRLF = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n в виде данных
+        // Find delimiter between headers and body (double CRLF: \r\n\r\n)
+        let doubleCRLF = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n as data
         
-        // Ищем границу между заголовками и телом
-        guard let headerEndIndex = find(pattern: doubleCRLF, in: data) else {
-            print("❌ Не удалось найти границу между заголовками и телом запроса")
+        // Find boundary between headers and body
+        guard let headerEndIndex = self.find(pattern: doubleCRLF, in: data) else {
+            print("❌ Failed to find boundary between headers and body of request")
             return nil
         }
         
-        // Извлекаем только заголовки для парсинга текста
+        // Extract only headers for text parsing
         let headersData = data.prefix(headerEndIndex)
         
-        // Пытаемся декодировать заголовки как UTF-8 (это должно быть всегда возможно)
+        // Try to decode headers as UTF-8 (this should always be possible)
         guard let headersString = String(data: headersData, encoding: .utf8) else {
-            print("❌ Не удалось декодировать заголовки запроса как UTF-8")
+            print("❌ Failed to decode request headers as UTF-8")
             return nil
         }
         
-        print("📋 Заголовки запроса:\n\(headersString)")
+        print("📋 Request headers:\n\(headersString)")
         
-        // Разделяем заголовки на строки
+        // Split headers into lines
         let lines = headersString.components(separatedBy: "\r\n")
         guard !lines.isEmpty else {
-            print("❌ Запрос не содержит строк")
+            print("❌ Request does not contain lines")
             return nil
         }
         
-        // Парсим строку запроса (первая строка)
+        // Parse request line (first line)
         let requestLine = lines[0].components(separatedBy: " ")
         guard requestLine.count >= 3 else {
-            print("❌ Неверный формат строки запроса: \(lines[0])")
+            print("❌ Invalid request line format: \(lines[0])")
             return nil
         }
         
         let method = requestLine[0]
         let path = requestLine[1]
         
-        print("📋 Метод: \(method), Путь: \(path)")
+        print("�� Method: \(method), Path: \(path)")
         
-        // Парсим заголовки
+        // Parse headers
         var headers: [String: String] = [:]
         
         for i in 1..<lines.count {
             let line = lines[i]
-            if line.isEmpty { continue } // Пропускаем пустые строки
+            if line.isEmpty { continue } // Skip empty lines
             
             let headerComponents = line.components(separatedBy: ": ")
             if headerComponents.count >= 2 {
                 let key = headerComponents[0]
                 let value = headerComponents.dropFirst().joined(separator: ": ")
                 headers[key] = value
-                print("📋 Заголовок: \(key): \(value)")
+                print("📋 Header: \(key): \(value)")
             } else {
-                print("⚠️ Неверный формат заголовка: \(line)")
+                print("⚠️ Invalid header format: \(line)")
             }
         }
         
-        // Теперь извлекаем тело запроса (после двойного CRLF)
+        // Now extract request body (after double CRLF)
         let bodyStartIndex = headerEndIndex + doubleCRLF.count
         let body = data.count > bodyStartIndex ? data.subdata(in: bodyStartIndex..<data.count) : Data()
         
-        print("✅ Тело запроса успешно извлечено, размер: \(body.count) байт")
+        print("✅ Request body successfully extracted, size: \(body.count) bytes")
         
-        // Для multipart/form-data запросов проверяем наличие boundary
+        // For multipart/form-data requests, check for boundary presence
         if let contentType = headers["Content-Type"], 
            contentType.starts(with: "multipart/form-data") {
             
-            print("📋 Обнаружен multipart/form-data запрос")
+            print("📋 Detected multipart/form-data request")
             
-            // Если отсутствует boundary, пытаемся его определить
+            // If boundary is missing, try to determine it automatically
             if !contentType.contains("boundary=") {
-                print("⚠️ В Content-Type отсутствует boundary, пытаемся определить автоматически")
+                print("⚠️ Boundary missing in Content-Type, trying to determine automatically")
                 
-                // Ищем возможный boundary в начале тела (обычно начинается с --)
-                if body.count > 2, body[0] == 0x2D, body[1] == 0x2D { // "--" в ASCII
-                    // Ищем конец строки с boundary
-                    if let boundaryEndIndex = find(pattern: Data([0x0D, 0x0A]), in: body) {
+                // Search for possible boundary at the start of the body (usually starts with --)
+                if body.count > 2, body[0] == 0x2D, body[1] == 0x2D { // "--" in ASCII
+                    // Search for line ending with boundary
+                    if let boundaryEndIndex = self.find(pattern: Data([0x0D, 0x0A]), in: body) {
                         let potentialBoundary = body.prefix(boundaryEndIndex)
                         if let boundaryString = String(data: potentialBoundary, encoding: .utf8) {
-                            // Удаляем -- в начале
+                            // Remove -- at the beginning
                             let boundary = boundaryString.dropFirst(2)
                             let newContentType = "\(contentType); boundary=\(boundary)"
-                            print("✅ Автоматически определен boundary: \(boundary)")
+                            print("✅ Automatically determined boundary: \(boundary)")
                             headers["Content-Type"] = newContentType
                         }
                     }
@@ -321,30 +321,30 @@ final class SimpleHTTPServer {
         ]
     }
     
-    /// Вспомогательный метод для поиска шаблона в данных
+    /// Helper method to find pattern in data
     /// - Parameters:
-    ///   - pattern: Шаблон для поиска
-    ///   - data: Данные, в которых искать
-    /// - Returns: Индекс начала найденного шаблона или nil, если шаблон не найден
+    ///   - pattern: Pattern to search for
+    ///   - data: Data to search in
+    /// - Returns: Start index of found pattern or nil if pattern not found
     private func find(pattern: Data, in data: Data) -> Int? {
-        // Базовые проверки безопасности
+        // Basic security checks
         guard !pattern.isEmpty, !data.isEmpty, pattern.count <= data.count else { 
             return nil 
         }
         
-        // Простая реализация алгоритма поиска подстроки
-        // Для больших данных стоит рассмотреть более эффективные алгоритмы (KMP, Boyer-Moore)
+        // Simple implementation of substring search algorithm
+        // For large data, consider more efficient algorithms (KMP, Boyer-Moore)
         let patternLength = pattern.count
         let dataLength = data.count
         
-        // Последний возможный индекс, с которого может начинаться шаблон
+        // Last possible index from which pattern can start
         let lastPossibleIndex = dataLength - patternLength
         
         for i in 0...lastPossibleIndex {
             var matched = true
             
             for j in 0..<patternLength {
-                // Безопасная проверка индексов
+                // Safe index check
                 guard i + j < dataLength else {
                     matched = false
                     break
@@ -364,124 +364,124 @@ final class SimpleHTTPServer {
         return nil
     }
     
-    /// Маршрутизирует запрос к соответствующему обработчику на основе пути
+    /// Routes request to corresponding handler based on path
     /// - Parameters:
-    ///   - connection: Сетевое соединение
-    ///   - request: Разобранный HTTP-запрос
+    ///   - connection: Network connection
+    ///   - request: Parsed HTTP request
     private func routeRequest(connection: NWConnection, request: [String: Any]) {
         guard 
             let method = request["method"] as? String,
             let path = request["path"] as? String
         else {
-            print("❌ Не удалось получить метод или путь запроса")
-            sendDefaultResponse(to: connection)
+            print("❌ Failed to get request method or path")
+            self.sendDefaultResponse(to: connection)
             return
         }
         
-        print("📥 Получен \(method) запрос: \(path)")
+        print("📥 Received \(method) request: \(path)")
         
-        // Нормализуем путь и проверяем соответствие эндпоинту транскрипции
+        // Normalize path and check against transcription endpoint
         let normalizedPath = path.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        print("🔍 Нормализованный путь: \(normalizedPath)")
+        print("🔍 Normalized path: \(normalizedPath)")
         
         if normalizedPath.hasSuffix("/v1/audio/transcriptions") || normalizedPath == "/v1/audio/transcriptions" {
-            print("✅ Обработка запроса транскрипции")
-            handleTranscriptionRequest(connection: connection, request: request)
+            print("✅ Processing transcription request")
+            self.handleTranscriptionRequest(connection: connection, request: request)
         } else {
-            print("❌ Неизвестный путь: \(path)")
-            sendDefaultResponse(to: connection)
+            print("❌ Unknown path: \(path)")
+            self.sendDefaultResponse(to: connection)
         }
     }
     
-    // MARK: - Обработка API запросов
+    // MARK: - Processing API Requests
     
-    /// Обрабатывает запрос транскрипции аудио
+    /// Processes transcription audio request
     /// - Parameters:
-    ///   - connection: Сетевое соединение
-    ///   - request: Разобранный HTTP-запрос
+    ///   - connection: Network connection
+    ///   - request: Parsed HTTP request
     private func handleTranscriptionRequest(connection: NWConnection, request: [String: Any]) {
         guard 
             let headers = request["headers"] as? [String: String],
             let body = request["body"] as? Data
         else {
-            print("❌ Ошибка: Невозможно получить заголовки или тело запроса")
-            sendErrorResponse(to: connection, message: "Неверный запрос")
+            print("❌ Error: Unable to get request headers or body")
+            self.sendErrorResponse(to: connection, message: "Invalid request")
             return
         }
         
-        // Отладочная информация о размере
+        // Debug information about size
         let bodyMB = Double(body.count) / 1024.0 / 1024.0
-        print("📊 Размер тела запроса: \(body.count) байт (\(String(format: "%.2f", bodyMB)) MB)")
+        print("📊 Request body size: \(body.count) bytes (\(String(format: "%.2f", bodyMB)) MB)")
         
-        // Проверка на разумный размер
+        // Check for reasonable size
         if body.count < 100 {
-            print("⚠️ Предупреждение: Тело запроса подозрительно маленькое (\(body.count) байт)")
-            sendErrorResponse(to: connection, message: "Тело запроса слишком маленькое, возможно, аудиофайл не был передан")
+            print("⚠️ Warning: Request body suspiciously small (\(body.count) bytes)")
+            self.sendErrorResponse(to: connection, message: "Request body too small, possibly audio file not transmitted")
             return
         }
         
         if body.count > 100 * 1024 * 1024 { // > 100 MB
-            print("⚠️ Предупреждение: Тело запроса слишком большое (\(String(format: "%.2f", bodyMB)) MB)")
-            sendErrorResponse(to: connection, message: "Тело запроса слишком большое, максимальный размер аудиофайла - 100 MB")
+            print("⚠️ Warning: Request body suspiciously large (\(String(format: "%.2f", bodyMB)) MB)")
+            self.sendErrorResponse(to: connection, message: "Request body too large, maximum audio file size - 100 MB")
             return
         }
         
-        // Отладочная информация о заголовках
-        print("📋 Полученные заголовки:")
+        // Debug information about headers
+        print("📋 Received headers:")
         for (key, value) in headers {
             print("   \(key): \(value)")
         }
         
-        // Проверяем Content-Type
+        // Check Content-Type
         let contentTypeHeader = headers["Content-Type"] ?? ""
         print("📋 Content-Type: \(contentTypeHeader)")
         
-        // Засекаем время обработки
+        // Start processing time
         let startTime = Date()
         
-        // Создаем запрос в зависимости от типа контента
+        // Create request depending on content type
         var whisperRequest: WhisperAPIRequest
         
         if contentTypeHeader.starts(with: "multipart/form-data") {
-            // Стандартный путь обработки multipart/form-data
-            print("🔄 Начинаем парсинг multipart/form-data...")
-            whisperRequest = parseMultipartFormData(data: body, contentType: contentTypeHeader)
+            // Standard path for processing multipart/form-data
+            print("🔄 Starting multipart/form-data parsing...")
+            whisperRequest = self.parseMultipartFormData(data: body, contentType: contentTypeHeader)
             
-            // Если стандартный парсер не справился, пробуем альтернативный подход
+            // If standard parser failed, try alternative approach
             if !whisperRequest.isValid && body.count > 0 {
-                print("⚠️ Стандартный парсер не смог извлечь аудиоданные, пробуем альтернативный подход")
-                whisperRequest = parseAudioDataDirectly(from: body, contentType: contentTypeHeader)
+                print("⚠️ Standard parser failed to extract audio data, trying alternative approach")
+                whisperRequest = self.parseAudioDataDirectly(from: body, contentType: contentTypeHeader)
             }
         } else {
-            // Для других типов контента просто используем все тело как аудиоданные
-            print("⚠️ Необычный тип контента, пробуем обработать тело как аудиоданные напрямую")
+            // For other content types, simply use all body as audio data
+            print("⚠️ Unusual content type, trying to process body as audio data directly")
             var request = WhisperAPIRequest()
             request.audioData = body
             whisperRequest = request
         }
         
-        // Логируем время, затраченное на парсинг
+        // Log parsing time
         let parsingTime = Date().timeIntervalSince(startTime)
-        print("⏱️ Время парсинга запроса: \(String(format: "%.2f", parsingTime)) секунд")
+        print("⏱️ Request parsing time: \(String(format: "%.2f", parsingTime)) seconds")
         
         if whisperRequest.isValid {
-            // Устанавливаем таймаут на соединение для долгих запросов (10 минут)
+            // Set timeout for connection for long requests (10 minutes)
             let timeoutDispatchItem = DispatchWorkItem {
-                // Проверяем состояние соединения
+                // Check connection state
                 if case .cancelled = connection.state {
-                    return // Соединение уже закрыто
+                    return // Connection already closed
                 }
                 
                 if case .failed(_) = connection.state {
-                    return // Соединение уже в ошибке
+                    return // Connection already in error
                 }
                 
-                print("⚠️ Превышено время ожидания транскрипции (10 минут), отменяем запрос")
-                self.sendErrorResponse(to: connection, message: "Превышено время ожидания обработки аудио")
+                print("⚠️ Transcription waiting time exceeded (10 minutes), cancelling request")
+                self.sendErrorResponse(to: connection, message: "Transcription processing time exceeded")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 600, execute: timeoutDispatchItem)
             
-            // Выполняем транскрипцию с использованием Whisper
+            // Perform transcription using Whisper
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { 
                     timeoutDispatchItem.cancel()
@@ -490,44 +490,44 @@ final class SimpleHTTPServer {
                 
                 let transcriptionStartTime = Date()
                 
-                // Проверяем размер аудиоданных
+                // Check audio data size
                 if let audioData = whisperRequest.audioData {
                     let sizeMB = Double(audioData.count) / 1024.0 / 1024.0
-                    print("🔄 Начинаем транскрипцию аудио размером \(audioData.count) байт (\(String(format: "%.2f", sizeMB)) MB)")
+                    print("🔄 Starting transcription of audio of size \(audioData.count) bytes (\(String(format: "%.2f", sizeMB)) MB)")
                     
-                    // Дополнительная проверка целостности данных
+                    // Additional data integrity check
                     if audioData.count < 1000 {
-                        print("⚠️ Предупреждение: аудиофайл подозрительно мал, возможно данные были обрезаны")
+                        print("⚠️ Warning: audio file suspiciously small, possibly data truncated")
                     } else {
-                        print("✅ Размер аудио данных выглядит нормальным")
+                        print("✅ Audio data size looks normal")
                     }
                 } else {
-                    print("⚠️ Странно, но аудиоданные стали nil, хотя проверка isValid была пройдена")
+                    print("⚠️ Strange, but audio data became nil, although isValid check passed")
                 }
                 
-                // Используем наш сервис транскрипции для обработки аудио
-                print("🔄 Запускаем процесс транскрипции...")
+                // Use our transcription service for audio processing
+                print("🔄 Starting transcription process...")
                 let transcription = WhisperTranscriptionService.transcribeAudioData(
                     whisperRequest.audioData!,
                     language: whisperRequest.language,
                     prompt: whisperRequest.prompt
                 )
                 
-                // Отменяем таймаут, так как транскрипция завершена
+                // Cancel timeout since transcription completed
                 timeoutDispatchItem.cancel()
                 
-                // Вычисляем время транскрипции
+                // Calculate transcription time
                 let transcriptionTime = Date().timeIntervalSince(transcriptionStartTime)
-                print("⏱️ Время транскрипции: \(String(format: "%.2f", transcriptionTime)) секунд")
+                print("⏱️ Transcription time: \(String(format: "%.2f", transcriptionTime)) seconds")
                 
-                // Проверяем, активно ли ещё соединение перед отправкой ответа
+                // Check if connection is still active before sending response
                 if case .cancelled = connection.state {
-                    print("⚠️ Соединение было закрыто во время транскрипции, ответ не отправлен")
+                    print("⚠️ Connection closed during transcription, response not sent")
                     return
                 }
                 
                 if case .failed(_) = connection.state {
-                    print("⚠️ Соединение в ошибочном состоянии, ответ не отправлен")
+                    print("⚠️ Connection in error state, response not sent")
                     return
                 }
                 
@@ -535,7 +535,7 @@ final class SimpleHTTPServer {
                     if let transcription = transcription {
                         let previewLength = min(100, transcription.count)
                         let previewText = transcription.prefix(previewLength)
-                        print("✅ Транскрипция успешно выполнена: \"\(previewText)...\" (\(transcription.count) символов)")
+                        print("✅ Transcription completed successfully: \"\(previewText)...\" (\(transcription.count) characters)")
                         self.sendTranscriptionResponse(
                             to: connection,
                             format: whisperRequest.responseFormat,
@@ -543,114 +543,114 @@ final class SimpleHTTPServer {
                             temperature: whisperRequest.temperature
                         )
                     } else {
-                        print("❌ Не удалось выполнить транскрипцию")
+                        print("❌ Failed to perform transcription")
                         self.sendErrorResponse(
                             to: connection,
-                            message: "Ошибка при транскрипции аудио. Убедитесь, что формат аудио поддерживается."
+                            message: "Transcription error: Ensure audio format is supported."
                         )
                     }
                     
-                    // Общее время обработки запроса
+                    // Total processing time for request
                     let totalTime = Date().timeIntervalSince(startTime)
-                    print("⏱️ Общее время обработки запроса: \(String(format: "%.2f", totalTime)) секунд")
+                    print("⏱️ Total request processing time: \(String(format: "%.2f", totalTime)) seconds")
                 }
             }
         } else {
-            print("❌ Ошибка: Запрос не содержит аудиофайла или другие обязательные данные")
-            sendErrorResponse(to: connection, message: "Неверный запрос: Отсутствует аудиофайл")
+            print("❌ Error: Request does not contain audio file or other required data")
+            self.sendErrorResponse(to: connection, message: "Invalid request: Missing audio file")
         }
     }
     
-    /// Альтернативный метод для прямого извлечения аудиоданных из запроса
+    /// Alternative method for direct extraction of audio data from request
     /// - Parameters:
-    ///   - body: Тело запроса
-    ///   - contentType: Заголовок Content-Type
-    /// - Returns: Запрос WhisperAPI с извлеченными данными
+    ///   - body: Request body
+    ///   - contentType: Content-Type header
+    /// - Returns: WhisperAPIRequest with extracted data
     private func parseAudioDataDirectly(from body: Data, contentType: String) -> WhisperAPIRequest {
         var request = WhisperAPIRequest()
         
-        print("🔍 Пытаемся определить аудиоданные напрямую из тела размером \(body.count) байт")
+        print("🔍 Trying to determine audio data directly from body of size \(body.count) bytes")
         
-        // Ищем WAV-заголовок (RIFF)
+        // Search for WAV header (RIFF)
         func findWavHeader(in data: Data) -> Int? {
-            // WAV начинается с "RIFF"
-            let riffSignature = Data([0x52, 0x49, 0x46, 0x46]) // "RIFF" в ASCII
-            return find(pattern: riffSignature, in: data)
+            // WAV starts with "RIFF"
+            let riffSignature = Data([0x52, 0x49, 0x46, 0x46]) // "RIFF" in ASCII
+            return self.find(pattern: riffSignature, in: data)
         }
         
-        // Ищем MP3-заголовок (ID3 или MPEG frame sync)
+        // Search for MP3 header (ID3 or MPEG frame sync)
         func findMp3Header(in data: Data) -> Int? {
-            // ID3 тэг начинается с "ID3"
-            let id3Signature = Data([0x49, 0x44, 0x33]) // "ID3" в ASCII
+            // ID3 tag starts with "ID3"
+            let id3Signature = Data([0x49, 0x44, 0x33]) // "ID3" in ASCII
             
-            // MPEG frame sync обычно начинается с 0xFF 0xFB или похожих байтов
+            // MPEG frame sync usually starts with 0xFF 0xFB or similar bytes
             let mpegFrameSync = Data([0xFF, 0xFB])
             
-            if let id3Position = find(pattern: id3Signature, in: data) {
+            if let id3Position = self.find(pattern: id3Signature, in: data) {
                 return id3Position
             }
             
-            return find(pattern: mpegFrameSync, in: data)
+            return self.find(pattern: mpegFrameSync, in: data)
         }
         
-        // Поиск аудиоданных
+        // Search for audio data
         var audioStart: Int? = nil
         
-        // Проверяем наличие WAV-заголовка
+        // Check for WAV header presence
         if let wavPos = findWavHeader(in: body) {
-            print("✅ Найден WAV-заголовок на позиции \(wavPos)")
+            print("✅ Found WAV header at position \(wavPos)")
             audioStart = wavPos
         } 
-        // Проверяем наличие MP3-заголовка
+        // Check for MP3 header presence
         else if let mp3Pos = findMp3Header(in: body) {
-            print("✅ Найден MP3-заголовок на позиции \(mp3Pos)")
+            print("✅ Found MP3 header at position \(mp3Pos)")
             audioStart = mp3Pos
         }
-        // Если не нашли заголовки, но есть достаточно данных, предполагаем что всё тело - аудио
+        // If no headers found but there's enough data, assume all body is audio
         else if body.count > 1000 {
-            print("⚠️ Аудиозаголовки не найдены, но есть данные - предполагаем, что всё тело может быть аудио")
+            print("⚠️ Audio headers not found, but data exists - assuming all body may be audio")
             audioStart = 0
         }
         
-        // Если нашли начало аудиоданных, извлекаем их
+        // If audio data start found, extract it
         if let start = audioStart {
             request.audioData = body.subdata(in: start..<body.count)
-            print("✅ Извлечены аудиоданные размером \(request.audioData?.count ?? 0) байт")
+            print("✅ Extracted audio data of size \(request.audioData?.count ?? 0) bytes")
             
-            // Добавляем параметры по умолчанию
+            // Add default parameters
             request.responseFormat = .json
         }
         
         return request
     }
     
-    // MARK: - Обработка multipart/form-data
+    // MARK: - Processing multipart/form-data
     
-    /// Разбирает содержимое multipart/form-data
+    /// Parses multipart/form-data content
     /// - Parameters:
-    ///   - data: Необработанные multipart данные формы
-    ///   - contentType: Значение заголовка Content-Type
-    /// - Returns: WhisperAPIRequest, содержащий разобранные поля
+    ///   - data: Unprocessed multipart form data
+    ///   - contentType: Content-Type header value
+    /// - Returns: WhisperAPIRequest with parsed fields
     private func parseMultipartFormData(data: Data, contentType: String) -> WhisperAPIRequest {
         var request = WhisperAPIRequest()
         
-        print("🔍 Начинаем разбор multipart/form-data размером \(data.count) байт")
+        print("🔍 Starting multipart/form-data parsing of size \(data.count) bytes")
         
-        // Отладка: выводим первые байты данных в hex формате
+        // Debug: output first 50 bytes of data in hex format
         if data.count > 50 {
             let previewBytes = data.prefix(50)
             let hexString = previewBytes.map { String(format: "%02x", $0) }.joined(separator: " ")
-            print("🔍 Первые 50 байт: \(hexString)")
+            print("�� First 50 bytes: \(hexString)")
         }
         
-        // Извлекаем границу из Content-Type
+        // Extract boundary from Content-Type
         let boundaryComponents = contentType.components(separatedBy: "boundary=")
         guard boundaryComponents.count > 1 else {
-            print("❌ Граница не найдена в Content-Type: \(contentType)")
+            print("❌ Boundary not found in Content-Type: \(contentType)")
             return request
         }
         
-        // Извлекаем boundary, удаляя кавычки, если они есть
+        // Extract boundary, removing quotes if they exist
         var boundary = boundaryComponents[1]
         if boundary.contains(";") {
             boundary = boundary.components(separatedBy: ";")[0]
@@ -658,51 +658,51 @@ final class SimpleHTTPServer {
         if boundary.hasPrefix("\"") && boundary.hasSuffix("\"") {
             boundary = String(boundary.dropFirst().dropLast())
         }
-        print("✅ Найдена граница: \(boundary)")
+        print("✅ Found boundary: \(boundary)")
         
-        // Создаем полную границу и конечную границу как данные
-        // ВАЖНО: формат границы в теле: "--boundary" (без \r\n!)
+        // Create full boundary and end boundary as data
+        // IMPORTANT: format boundary in body: "--boundary" (without \r\n!)
         let fullBoundaryString = "--\(boundary)"
         let endBoundaryString = "--\(boundary)--"
         
         guard let fullBoundary = fullBoundaryString.data(using: .utf8),
               let endBoundary = endBoundaryString.data(using: .utf8) else {
-            print("❌ Не удалось создать границы как данные")
+            print("❌ Failed to create boundaries as data")
             return request
         }
         
-        print("🔍 Полная граница: \(fullBoundaryString)")
-        print("🔍 Конечная граница: \(endBoundaryString)")
+        print("🔍 Full boundary: \(fullBoundaryString)")
+        print("🔍 End boundary: \(endBoundaryString)")
         
-        // Отладка: поиск границы в первых 100 байтах
+        // Debug: search boundary in first 100 bytes
         if data.count > 100 {
             let searchRange = data.prefix(100)
-            if let firstBoundaryPos = find(pattern: fullBoundary, in: searchRange) {
-                print("✅ Найдена первая граница на позиции \(firstBoundaryPos)")
+            if let firstBoundaryPos = self.find(pattern: fullBoundary, in: searchRange) {
+                print("✅ Found first boundary at position \(firstBoundaryPos)")
                 
-                // Выводим 10 байт до и после границы для проверки
+                // Output 10 bytes before and after boundary for verification
                 let startIdx = max(0, firstBoundaryPos - 10)
                 let endIdx = min(searchRange.count, firstBoundaryPos + fullBoundary.count + 10)
                 let contextData = searchRange.subdata(in: startIdx..<endIdx)
                 let hexContext = contextData.map { String(format: "%02x", $0) }.joined(separator: " ")
-                print("🔍 Контекст границы: \(hexContext)")
+                print("🔍 Boundary context: \(hexContext)")
             } else {
-                print("❌ Граница не найдена в первых 100 байтах")
+                print("❌ Boundary not found in first 100 bytes")
             }
         }
         
-        // Ищем все вхождения границы в данных
+        // Search for all boundary occurrences in data
         var boundaryPositions: [Int] = []
         
-        // Сначала ищем первую границу
-        if let firstPosition = find(pattern: fullBoundary, in: data) {
+        // First search for first boundary
+        if let firstPosition = self.find(pattern: fullBoundary, in: data) {
             boundaryPositions.append(firstPosition)
             
-            // Теперь ищем последующие границы
+            // Now search for subsequent boundaries
             var currentPosition = firstPosition + fullBoundary.count
             
             while currentPosition < data.count - fullBoundary.count {
-                if let nextPosition = find(pattern: fullBoundary, in: data.subdata(in: currentPosition..<data.count)) {
+                if let nextPosition = self.find(pattern: fullBoundary, in: data.subdata(in: currentPosition..<data.count)) {
                     let absolutePosition = currentPosition + nextPosition
                     boundaryPositions.append(absolutePosition)
                     currentPosition = absolutePosition + fullBoundary.count
@@ -712,49 +712,49 @@ final class SimpleHTTPServer {
             }
         }
         
-        // Также проверяем наличие конечной границы
-        if let endBoundaryPosition = find(pattern: endBoundary, in: data) {
+        // Also check for end boundary presence
+        if let endBoundaryPosition = self.find(pattern: endBoundary, in: data) {
             boundaryPositions.append(endBoundaryPosition)
         }
         
-        print("🔍 Найдено \(boundaryPositions.count) границ в данных: \(boundaryPositions)")
+        print("🔍 Found \(boundaryPositions.count) boundaries in data: \(boundaryPositions)")
         
-        // Если нет границ, не можем продолжать
+        // If no boundaries, can't continue
         if boundaryPositions.isEmpty {
-            print("❌ Границы не найдены в данных")
+            print("❌ Boundaries not found in data")
             return request
         }
         
-        // Обрабатываем каждую часть между границами
+        // Process each part between boundaries
         for i in 0..<(boundaryPositions.count - 1) {
-            // Начальная позиция части (пропускаем границу и CRLF после неё)
-            let partStart = boundaryPositions[i] + fullBoundary.count + 2 // +2 для \r\n после границы
+            // Start position of part (skip boundary and CRLF after it)
+            let partStart = boundaryPositions[i] + fullBoundary.count + 2 // +2 for \r\n after boundary
             let partEnd = boundaryPositions[i + 1]
             
             if partStart >= partEnd || partStart >= data.count {
-                print("⚠️ Пустая или некорректная часть между границами \(i) и \(i+1): \(partStart) - \(partEnd)")
+                print("⚠️ Empty or invalid part between boundaries \(i) and \(i+1): \(partStart) - \(partEnd)")
                 continue
             }
             
             let partData = data.subdata(in: partStart..<partEnd)
-            print("🔍 Обработка части #\(i+1) размером \(partData.count) байт")
+            print("🔍 Processing part #\(i+1) of size \(partData.count) bytes")
             
-            // Ищем разделитель между заголовками и содержимым части (двойной CRLF)
+            // Search for delimiter between headers and part content (double CRLF)
             let doubleCRLF = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
             
-            guard let headerEndIndex = find(pattern: doubleCRLF, in: partData) else {
-                print("❌ Не удалось найти заголовки в части #\(i+1)")
+            guard let headerEndIndex = self.find(pattern: doubleCRLF, in: partData) else {
+                print("❌ Failed to find headers in part #\(i+1)")
                 continue
             }
             
-            // Извлекаем заголовки
+            // Extract headers
             let headersData = partData.prefix(headerEndIndex)
             guard let headersString = String(data: headersData, encoding: .utf8) else {
-                print("❌ Не удалось декодировать заголовки части #\(i+1)")
+                print("❌ Failed to decode part #\(i+1) headers")
                 continue
             }
             
-            // Преобразуем заголовки в словарь
+            // Convert headers to dictionary
             var headers: [String: String] = [:]
             
             let headerLines = headersString.components(separatedBy: "\r\n")
@@ -767,53 +767,53 @@ final class SimpleHTTPServer {
                 }
             }
             
-            print("📋 Заголовки части #\(i+1):")
+            print("📋 Part #\(i+1) headers:")
             for (key, value) in headers {
                 print("   \(key): \(value)")
             }
             
-            // Извлекаем информацию о поле из Content-Disposition
+            // Extract field information from Content-Disposition
             guard let contentDisposition = headers["Content-Disposition"],
-                  let fieldName = extractFieldName(from: contentDisposition) else {
-                print("❌ Не удалось извлечь имя поля из заголовка Content-Disposition")
+                  let fieldName = self.extractFieldName(from: contentDisposition) else {
+                print("❌ Failed to extract field name from Content-Disposition header")
                 continue
             }
             
-            print("📋 Имя поля: \(fieldName)")
+            print("📋 Field name: \(fieldName)")
             
-            // Извлекаем имя файла, если оно есть
-            let filename = extractFilename(from: contentDisposition)
+            // Extract filename if it exists
+            let filename = self.extractFilename(from: contentDisposition)
             if let filename = filename {
-                print("📋 Имя файла: \(filename)")
+                print("📋 Filename: \(filename)")
             }
             
-            // Извлекаем содержимое части (после заголовков)
+            // Extract part content (after headers)
             let contentStartIndex = headerEndIndex + doubleCRLF.count
             
             if contentStartIndex < partData.count {
                 let contentData = partData.subdata(in: contentStartIndex..<partData.count)
-                print("📋 Размер содержимого поля \(fieldName): \(contentData.count) байт")
+                print("📋 Field \(fieldName) content size: \(contentData.count) bytes")
                 
-                // Обрабатываем различные типы полей
-                processFieldContent(fieldName: fieldName, data: contentData, request: &request)
+                // Process different field types
+                self.processFieldContent(fieldName: fieldName, data: contentData, request: &request)
             } else {
-                print("⚠️ Пустое содержимое для поля \(fieldName)")
+                print("⚠️ Empty content for field \(fieldName)")
             }
         }
         
-        // Проверяем, есть ли валидные аудиоданные
+        // Check if valid audio data exists
         if let audioData = request.audioData, !audioData.isEmpty {
-            print("✅ Успешно разобран аудиофайл размером \(audioData.count) байт")
+            print("✅ Successfully parsed audio file of size \(audioData.count) bytes")
         } else {
-            print("❌ Аудиоданные не найдены в запросе")
+            print("❌ Audio data not found in request")
         }
         
         return request
     }
     
-    /// Извлекает имя поля из заголовка Content-Disposition
-    /// - Parameter contentDisposition: Значение заголовка Content-Disposition
-    /// - Returns: Имя поля или nil, если не удалось извлечь
+    /// Extracts field name from Content-Disposition header
+    /// - Parameter contentDisposition: Content-Disposition header value
+    /// - Returns: Field name or nil if extraction failed
     private func extractFieldName(from contentDisposition: String) -> String? {
         guard let nameMatch = contentDisposition.range(of: "name=\"([^\"]+)\"", options: .regularExpression) else {
             return nil
@@ -824,9 +824,9 @@ final class SimpleHTTPServer {
         return String(contentDisposition[nameStart..<nameEnd])
     }
     
-    /// Извлекает имя файла из заголовка Content-Disposition
-    /// - Parameter contentDisposition: Значение заголовка Content-Disposition
-    /// - Returns: Имя файла или nil, если файла нет
+    /// Extracts filename from Content-Disposition header
+    /// - Parameter contentDisposition: Content-Disposition header value
+    /// - Returns: Filename or nil if no file
     private func extractFilename(from contentDisposition: String) -> String? {
         guard let filenameMatch = contentDisposition.range(of: "filename=\"([^\"]+)\"", options: .regularExpression) else {
             return nil
@@ -837,134 +837,134 @@ final class SimpleHTTPServer {
         return String(contentDisposition[filenameStart..<filenameEnd])
     }
     
-    /// Обрабатывает содержимое поля формы
+    /// Processes field content
     /// - Parameters:
-    ///   - fieldName: Имя поля
-    ///   - data: Данные содержимого
-    ///   - request: Запрос для обновления
+    ///   - fieldName: Field name
+    ///   - data: Field content data
+    ///   - request: Request for update
     private func processFieldContent(fieldName: String, data: Data, request: inout WhisperAPIRequest) {
-        // Показываем начало данных (если возможно как текст)
+        // Show start of data (if possible as text)
         let previewSize = min(20, data.count)
         if let textPreview = String(data: data.prefix(previewSize), encoding: .utf8) {
-            print("🔍 Начало содержимого \(fieldName) (текст): \(textPreview)")
+            print("🔍 Start of content \(fieldName) (text): \(textPreview)")
         } else {
-            print("🔍 Бинарные данные для поля \(fieldName)")
+            print("🔍 Binary data for field \(fieldName)")
         }
         
-        // Обрабатываем различные типы полей
+        // Process different field types
         switch fieldName {
         case "file":
             request.audioData = data
             let sizeMB = Double(data.count) / 1024.0 / 1024.0
-            print("✅ Установлены аудиоданные размером \(data.count) байт (\(String(format: "%.2f", sizeMB)) MB)")
+            print("✅ Set audio data of size \(data.count) bytes (\(String(format: "%.2f", sizeMB)) MB)")
             
-            // Проверка наличия корректных аудиоданных
+            // Check for presence of correct audio data
             if data.count < 1000 {
-                print("⚠️ Предупреждение: аудиофайл слишком мал (\(data.count) байт), возможно, данные обрезаны")
+                print("⚠️ Warning: audio file suspiciously small (\(data.count) bytes), possibly data truncated")
             } else if data.count > 5 * 1024 * 1024 {
-                print("ℹ️ Информация: обрабатываем большой аудиофайл (\(String(format: "%.2f", sizeMB)) MB)")
+                print("ℹ️ Information: processing large audio file (\(String(format: "%.2f", sizeMB)) MB)")
             }
             
         case "prompt":
             if let textValue = String(data: data, encoding: .utf8) {
                 let prompt = textValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 request.prompt = prompt
-                print("✅ Установлена подсказка: \(prompt)")
+                print("✅ Set prompt: \(prompt)")
             } else {
-                print("❌ Не удалось декодировать содержимое подсказки как текст")
+                print("❌ Failed to decode prompt content as text")
             }
             
         case "response_format":
             if let textValue = String(data: data, encoding: .utf8) {
                 let format = textValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 request.responseFormat = ResponseFormat.from(string: format)
-                print("✅ Установлен формат ответа: \(format)")
+                print("✅ Set response format: \(format)")
             } else {
-                print("❌ Не удалось декодировать формат ответа как текст")
+                print("❌ Failed to decode response format as text")
             }
             
         case "temperature":
             if let textValue = String(data: data, encoding: .utf8),
                let temp = Double(textValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
                 request.temperature = temp
-                print("✅ Установлена температура: \(temp)")
+                print("✅ Set temperature: \(temp)")
             } else {
-                print("❌ Не удалось декодировать температуру как число")
+                print("❌ Failed to decode temperature as number")
             }
             
         case "language":
             if let textValue = String(data: data, encoding: .utf8) {
                 let language = textValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 request.language = language
-                print("✅ Установлен язык: \(language)")
+                print("✅ Set language: \(language)")
             } else {
-                print("❌ Не удалось декодировать язык как текст")
+                print("❌ Failed to decode language as text")
             }
             
         case "model":
             if let textValue = String(data: data, encoding: .utf8) {
                 let model = textValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                print("✅ Получена модель: \(model) (игнорируется)")
-                // Просто логируем, не используем, так как мы используем встроенную модель
+                print("✅ Received model: \(model) (ignored)")
+                // Simply log, don't use, since we're using built-in model
             } else {
-                print("❌ Не удалось декодировать модель как текст")
+                print("❌ Failed to decode model as text")
             }
             
         default:
             if let textValue = String(data: data, encoding: .utf8) {
-                print("📝 Необработанное поле: \(fieldName) = \(textValue.prefix(50))")
+                print("📝 Unprocessed field: \(fieldName) = \(textValue.prefix(50))")
             } else {
-                print("📝 Необработанное бинарное поле: \(fieldName) размером \(data.count) байт")
+                print("📝 Unprocessed binary field: \(fieldName) of size \(data.count) bytes")
             }
         }
     }
     
-    // MARK: - Отправка ответов
+    // MARK: - Sending Responses
     
-    /// Отправляет ответ с транскрипцией на соединение
+    /// Sends transcription response to connection
     /// - Parameters:
-    ///   - connection: Сетевое соединение
-    ///   - format: Формат ответа (json, text и т.д.)
-    ///   - text: Текст транскрипции
-    ///   - temperature: Температура, использованная при генерации
+    ///   - connection: Network connection
+    ///   - format: Response format (json, text, etc.)
+    ///   - text: Transcription text
+    ///   - temperature: Temperature used in generation
     private func sendTranscriptionResponse(
         to connection: NWConnection, 
         format: ResponseFormat, 
         text: String,
         temperature: Double
     ) {
-        // Получаем тело ответа и тип контента
-        let (contentType, responseBody) = createResponseBody(format: format, text: text, temperature: temperature)
+        // Get response body and content type
+        let (contentType, responseBody) = self.createResponseBody(format: format, text: text, temperature: temperature)
         
-        // Логируем информацию о формате ответа
-        print("📤 Отправляем ответ в формате \(format.rawValue) (\(contentType))")
+        // Log response format information
+        print("📤 Sending response in format \(format.rawValue) (\(contentType))")
         
-        // Выводим размер ответа
+        // Output response size
         let responseSizeKB = Double(responseBody.utf8.count) / 1024.0
-        print("📤 Размер ответа: \(responseBody.utf8.count) байт (\(String(format: "%.2f", responseSizeKB)) KB)")
+        print("📤 Response size: \(responseBody.utf8.count) bytes (\(String(format: "%.2f", responseSizeKB)) KB)")
         
-        // Выводим превью текста транскрипции
+        // Output transcription text preview
         let previewLength = min(50, text.count)
         let textPreview = text.prefix(previewLength)
-        print("📝 Превью текста: \"\(textPreview)\(text.count > previewLength ? "..." : "")\"")
+        print("📝 Transcription text preview: \"\(textPreview)\(text.count > previewLength ? "..." : "")\"")
         
-        // Отправляем HTTP-ответ
-        sendHTTPResponse(
+        // Send HTTP response
+        self.sendHTTPResponse(
             to: connection,
             statusCode: 200,
             statusMessage: "OK",
             contentType: contentType,
             body: responseBody,
-            onSuccess: { print("✅ Ответ API Whisper успешно отправлен") }
+            onSuccess: { print("✅ Whisper API transcription response sent successfully") }
         )
     }
     
-    /// Создает тело ответа в нужном формате
+    /// Creates response body in the required format
     /// - Parameters:
-    ///   - format: Требуемый формат ответа
-    ///   - text: Текст транскрипции
-    ///   - temperature: Температура, использованная при генерации
-    /// - Returns: Кортеж с типом контента и телом ответа
+    ///   - format: Required response format
+    ///   - text: Transcription text
+    ///   - temperature: Temperature used in generation
+    /// - Returns: Tuple with content type and response body
     private func createResponseBody(format: ResponseFormat, text: String, temperature: Double = 0.0) -> (contentType: String, body: String) {
         switch format {
         case .json:
@@ -974,22 +974,22 @@ final class SimpleHTTPServer {
                let jsonString = String(data: jsonData, encoding: .utf8) {
                 return ("application/json", jsonString)
             } else {
-                return ("application/json", "{\"text\": \"Ошибка создания JSON-ответа\"}")
+                return ("application/json", "{\"text\": \"Server creation JSON response error\"}")
             }
             
         case .verbose_json:
-            // Разбиваем текст на два сегмента для примера
+            // Split text into two segments for example
             let words = text.components(separatedBy: " ")
             let halfIndex = max(1, words.count / 2)
             let firstSegment = words[0..<halfIndex].joined(separator: " ")
             let secondSegment = words[halfIndex..<words.count].joined(separator: " ")
             
-            // Оцениваем длительность аудио (приблизительно)
-            let estimatedDuration = Double(text.count) / 20.0 // примерная оценка
+            // Estimate audio duration (approximately)
+            let estimatedDuration = Double(text.count) / 20.0 // approximate estimate
             
             let verboseResponse: [String: Any] = [
                 "task": "transcribe",
-                "language": "auto", // определяется автоматически
+                "language": "auto", // determined automatically
                 "duration": estimatedDuration,
                 "text": text,
                 "segments": [
@@ -1024,20 +1024,20 @@ final class SimpleHTTPServer {
                let jsonString = String(data: jsonData, encoding: .utf8) {
                 return ("application/json", jsonString)
             } else {
-                return ("application/json", "{\"text\": \"Ошибка создания подробного JSON-ответа\"}")
+                return ("application/json", "{\"text\": \"Server creation detailed JSON response error\"}")
             }
             
         case .text:
             return ("text/plain", text)
             
         case .srt:
-            // Разбиваем текст на сегменты для создания субтитров
+            // Split text into segments for creating subtitles
             let words = text.components(separatedBy: " ")
             let halfIndex = max(1, words.count / 2)
             let firstSegment = words[0..<halfIndex].joined(separator: " ")
             let secondSegment = words[halfIndex..<words.count].joined(separator: " ")
             
-            let estimatedDuration = Double(text.count) / 20.0 // примерная оценка
+            let estimatedDuration = Double(text.count) / 20.0 // approximate estimate
             let midpoint = estimatedDuration / 2.0
             
             let srtText = """
@@ -1052,13 +1052,13 @@ final class SimpleHTTPServer {
             return ("text/plain", srtText)
             
         case .vtt:
-            // Разбиваем текст на сегменты для создания субтитров
+            // Split text into segments for creating subtitles
             let words = text.components(separatedBy: " ")
             let halfIndex = max(1, words.count / 2)
             let firstSegment = words[0..<halfIndex].joined(separator: " ")
             let secondSegment = words[halfIndex..<words.count].joined(separator: " ")
             
-            let estimatedDuration = Double(text.count) / 20.0 // примерная оценка
+            let estimatedDuration = Double(text.count) / 20.0 // approximate estimate
             let midpoint = estimatedDuration / 2.0
             
             let vttText = """
@@ -1074,10 +1074,10 @@ final class SimpleHTTPServer {
         }
     }
     
-    /// Отправляет ответ об ошибке
+    /// Sends error response
     /// - Parameters:
-    ///   - connection: Сетевое соединение
-    ///   - message: Сообщение об ошибке
+    ///   - connection: Network connection
+    ///   - message: Error message
     private func sendErrorResponse(to connection: NWConnection, message: String) {
         let errorResponse: [String: Any] = [
             "error": [
@@ -1086,43 +1086,43 @@ final class SimpleHTTPServer {
             ]
         ]
         
-        var responseBody = "{\"error\": {\"message\": \"Внутренняя ошибка сервера\"}}"
+        var responseBody = "{\"error\": {\"message\": \"Server internal error\"}}"
         if let jsonData = try? JSONSerialization.data(withJSONObject: errorResponse),
            let jsonString = String(data: jsonData, encoding: .utf8) {
             responseBody = jsonString
         }
         
-        sendHTTPResponse(
+        self.sendHTTPResponse(
             to: connection,
             statusCode: 400,
             statusMessage: "Bad Request",
             contentType: "application/json",
             body: responseBody,
-            onSuccess: { print("✅ Ответ с ошибкой отправлен") }
+            onSuccess: { print("✅ Error response sent") }
         )
     }
     
-    /// Отправляет стандартный ответ "OK"
-    /// - Parameter connection: Соединение для отправки ответа
+    /// Sends standard "OK" response
+    /// - Parameter connection: Connection for sending response
     private func sendDefaultResponse(to connection: NWConnection) {
-        sendHTTPResponse(
+        self.sendHTTPResponse(
             to: connection,
             statusCode: 200,
             statusMessage: "OK",
             contentType: "text/plain",
             body: "OK",
-            onSuccess: { print("✅ Стандартный ответ отправлен") }
+            onSuccess: { print("✅ Standard response sent") }
         )
     }
     
-    /// Отправляет HTTP-ответ на соединение
+    /// Sends HTTP response to connection
     /// - Parameters:
-    ///   - connection: Сетевое соединение
-    ///   - statusCode: Код статуса HTTP
-    ///   - statusMessage: Сообщение о статусе HTTP
-    ///   - contentType: Тип содержимого
-    ///   - body: Тело ответа
-    ///   - onSuccess: Замыкание, вызываемое при успешной отправке
+    ///   - connection: Network connection
+    ///   - statusCode: HTTP status code
+    ///   - statusMessage: HTTP status message
+    ///   - contentType: Content type
+    ///   - body: Response body
+    ///   - onSuccess: Closure called on successful sending
     private func sendHTTPResponse(
         to connection: NWConnection,
         statusCode: Int,
@@ -1143,39 +1143,39 @@ final class SimpleHTTPServer {
         
         let responseData = Data(response.utf8)
         
-        // Добавляем проверку состояния соединения перед отправкой данных
+        // Add connection state check before sending data
         if case .cancelled = connection.state {
-            print("⚠️ Попытка отправить данные через закрытое соединение")
+            print("⚠️ Attempt to send data through closed connection")
             return
         }
         
         if case .failed(_) = connection.state {
-            print("⚠️ Попытка отправить данные через ошибочное соединение")
+            print("⚠️ Attempt to send data through failed connection")
             return
         }
         
-        // Определим timeout на основе размера ответа. Даем больше времени для больших ответов.
+        // Define timeout based on response size. Give more time for larger responses.
         let timeoutSeconds: TimeInterval = min(5.0, Double(contentLength) / 10000 + 1.0)
-        print("🕒 Установлен таймаут на отправку ответа: \(String(format: "%.1f", timeoutSeconds)) секунд")
+        print("🕒 Set timeout for response sending: \(String(format: "%.1f", timeoutSeconds)) seconds")
         
         connection.send(content: responseData, completion: .contentProcessed { error in
             if let error = error {
-                print("❌ Ошибка отправки ответа: \(error.localizedDescription)")
+                print("❌ Response sending error: \(error.localizedDescription)")
             } else {
                 onSuccess()
-                print("✅ Ответ успешно обработан, размер: \(contentLength) байт")
+                print("✅ Response successfully processed, size: \(contentLength) bytes")
             }
             
-            // Задержка перед закрытием соединения для обеспечения отправки данных
-            // Используем более продолжительную задержку для больших ответов
+            // Delay before closing connection for data sending
+            // Use longer delay for larger responses
             DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds) {
-                // Проверяем состояние соединения
+                // Check connection state
                 if case .cancelled = connection.state {
-                    // Соединение уже закрыто
+                    // Connection already closed
                     return
                 }
                 
-                print("🔄 Закрываем соединение после отправки данных")
+                print("🔄 Closing connection after sending data")
                 connection.cancel()
             }
         })

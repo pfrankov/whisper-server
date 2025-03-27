@@ -1,32 +1,32 @@
 import Foundation
 import whisper
 
-/// Сервис транскрипции аудио с использованием whisper.cpp
+/// Audio transcription service using whisper.cpp
 struct WhisperTranscriptionService {
     
-    /// Выполняет транскрипцию аудиоданных, полученных из HTTP-запроса, и возвращает результат
+    /// Performs transcription of audio data received from HTTP request and returns the result
     /// - Parameters:
-    ///   - audioData: Бинарные данные аудиофайла
-    ///   - language: Код языка аудио (необязательно, по умолчанию определяется автоматически)
-    ///   - prompt: Подсказка для улучшения распознавания (необязательно)
-    /// - Returns: Строка с результатом транскрипции или nil в случае ошибки
+    ///   - audioData: Binary audio file data
+    ///   - language: Audio language code (optional, by default determined automatically)
+    ///   - prompt: Prompt to improve recognition (optional)
+    /// - Returns: String with transcription result or nil in case of error
     static func transcribeAudioData(_ audioData: Data, language: String? = nil, prompt: String? = nil) -> String? {
         let modelFilename = "ggml-base.en.bin"
         
-        // Находим модель
+        // Find the model
         guard let modelURL = findResourceFile(named: modelFilename, inSubdirectory: "models") else {
-            print("❌ Не удалось найти модель Whisper")
+            print("❌ Failed to find Whisper model")
             return nil
         }
         
-        // Инициализируем контекст Whisper
+        // Initialize Whisper context
         var contextParams = whisper_context_default_params()
         #if os(macOS) || os(iOS)
         contextParams.use_gpu = true
         #endif
         
         guard let context = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
-            print("❌ Не удалось инициализировать контекст Whisper")
+            print("❌ Failed to initialize Whisper context")
             return nil
         }
         
@@ -35,7 +35,7 @@ struct WhisperTranscriptionService {
         }
         
         do {
-            // Настраиваем параметры
+            // Configure parameters
             var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
             params.print_realtime = false
             params.print_progress = false
@@ -45,14 +45,14 @@ struct WhisperTranscriptionService {
             params.no_context = true
             params.single_segment = false
             
-            // Устанавливаем язык, если он указан
+            // Set language if specified
             if let language = language {
                 language.withCString { lang in
                     params.language = lang
                 }
             }
             
-            // Устанавливаем подсказку, если она указана
+            // Set prompt if specified
             if let prompt = prompt {
                 prompt.withCString { p in
                     params.initial_prompt = p
@@ -61,21 +61,21 @@ struct WhisperTranscriptionService {
             
             params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
             
-            // Преобразуем аудио в формат для Whisper
+            // Convert audio to format for Whisper
             let samples = convertWavToSamples(audioData)
             
-            // Запускаем транскрипцию
+            // Start transcription
             var result: Int32 = -1
             samples.withUnsafeBufferPointer { samples in
                 result = whisper_full(context, params, samples.baseAddress, Int32(samples.count))
             }
             
             if result != 0 {
-                print("❌ Ошибка при выполнении транскрипции")
+                print("❌ Error during transcription execution")
                 return nil
             }
             
-            // Собираем результаты
+            // Collect results
             let numSegments = whisper_full_n_segments(context)
             var transcription = ""
             
@@ -86,24 +86,24 @@ struct WhisperTranscriptionService {
             return transcription
             
         } catch {
-            print("❌ Произошла ошибка при обработке аудио: \(error.localizedDescription)")
+            print("❌ An error occurred during audio processing: \(error.localizedDescription)")
             return nil
         }
     }
     
-    /// Ищет файл в ресурсах приложения
+    /// Searches for a file in application resources
     private static func findResourceFile(named filename: String, inSubdirectory subdirectory: String? = nil) -> URL? {
-        // Имя и расширение файла
+        // File name and extension
         let components = filename.split(separator: ".")
         let name = String(components.first ?? "")
         let ext = components.count > 1 ? String(components.last!) : nil
         
-        // Ищем в ресурсах бандла
+        // Search in bundle resources
         if let url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: subdirectory) {
             return url
         }
         
-        // Ищем в директории ресурсов
+        // Search in resource directory
         if let resourceURL = Bundle.main.resourceURL {
             var resourcePath = resourceURL
             if let subdirectory = subdirectory {
@@ -118,10 +118,10 @@ struct WhisperTranscriptionService {
         return nil
     }
     
-    /// Преобразует аудио-данные в массив сэмплов для Whisper
-    /// Поддерживает WAV-формат и делает базовую проверку формата аудио
+    /// Converts audio data to sample array for Whisper
+    /// Supports WAV format and performs basic audio format validation
     private static func convertWavToSamples(_ audioData: Data) -> [Float] {
-        // Проверка WAV заголовка (RIFF)
+        // Check WAV header (RIFF)
         let isWav = audioData.count > 12 && 
                     audioData[0] == 0x52 && // R
                     audioData[1] == 0x49 && // I
@@ -129,25 +129,25 @@ struct WhisperTranscriptionService {
                     audioData[3] == 0x46    // F
         
         if isWav {
-            print("✅ Обнаружен WAV формат аудио")
+            print("✅ Detected WAV format audio")
             return convertWavDataToSamples(audioData)
         } else {
-            print("⚠️ Неизвестный формат аудио, попытка интерпретации как raw PCM")
-            // Для не-WAV аудио можно попытаться интерпретировать как raw PCM
-            // Это может работать, если данные уже в правильном формате
+            print("⚠️ Unknown audio format, attempting to interpret as raw PCM")
+            // For non-WAV audio, can try to interpret as raw PCM
+            // This may work if the data is already in the correct format
             return convertRawPCMToSamples(audioData)
         }
     }
     
-    /// Преобразует WAV-данные в массив сэмплов
+    /// Converts WAV data to sample array
     private static func convertWavDataToSamples(_ audioData: Data) -> [Float] {
         return audioData.withUnsafeBytes { bufferPtr -> [Float] in
-            let header = 44 // Стандартный размер WAV-заголовка
+            let header = 44 // Standard WAV header size
             let bytesPerSample = 2 // 16-bit PCM
             
-            // Проверяем, достаточно ли данных
+            // Check if there's enough data
             guard audioData.count > header + bytesPerSample else {
-                print("❌ WAV файл слишком короткий")
+                print("❌ WAV file too short")
                 return []
             }
             
@@ -165,17 +165,17 @@ struct WhisperTranscriptionService {
         }
     }
     
-    /// Пытается интерпретировать произвольные аудиоданные как raw PCM
+    /// Attempts to interpret arbitrary audio data as raw PCM
     private static func convertRawPCMToSamples(_ audioData: Data) -> [Float] {
         return audioData.withUnsafeBytes { bufferPtr -> [Float] in
-            let bytesPerSample = 2 // Предполагаем 16-bit PCM
+            let bytesPerSample = 2 // Assume 16-bit PCM
             
-            // Пропускаем некоторое количество начальных байт, которые могут содержать метаданные
-            // Это эвристика, может потребоваться настройка для разных форматов
-            let assumedHeaderSize = min(1024, audioData.count / 2) // Пропускаем первые 1024 байта или половину файла
+            // Skip some initial bytes that may contain metadata
+            // This is a heuristic, may need adjustment for different formats
+            let assumedHeaderSize = min(1024, audioData.count / 2) // Skip first 1024 bytes or half the file
             
             guard audioData.count > assumedHeaderSize + bytesPerSample else {
-                print("❌ Аудиофайл слишком короткий")
+                print("❌ Audio file too short")
                 return []
             }
             

@@ -1,27 +1,27 @@
 # WhisperServer
 
-WhisperServer — это приложение для macOS, работающее в фоновом режиме только с иконкой в строке меню. Оно предоставляет HTTP-сервер, совместимый с OpenAI Whisper API, для транскрипции аудио.
+WhisperServer is a macOS application that runs in the background with only a menu bar icon. It provides an HTTP server compatible with the OpenAI Whisper API for audio transcription.
 
-## Основные возможности
+## Key Features
 
-- Работает как приложение для строки меню (без иконки в доке)
-- Отображает иконку в строке меню с информацией о статусе
-- Предоставляет API, совместимый с OpenAI Whisper API
-- Поддерживает эндпоинт `/v1/audio/transcriptions` для транскрипции аудио
-- HTTP-сервер на порту 8888
-- Также возвращает "OK" в ответ на любой другой HTTP-запрос
+- Works as a menu bar application (no dock icon)
+- Displays a menu bar icon with status information
+- Provides an API compatible with the OpenAI Whisper API
+- Supports the `/v1/audio/transcriptions` endpoint for audio transcription
+- HTTP server on port 8888
+- Also returns "OK" in response to any other HTTP request
 
-## Как использовать
+## How to Use
 
-1. Соберите и запустите приложение в Xcode
-2. Найдите иконку сервера в строке меню
-3. HTTP-сервер автоматически запустится на порту 8888
-4. Используйте API-эндпоинт для транскрипции: `http://localhost:8888/v1/audio/transcriptions`
-5. Чтобы выйти из приложения, нажмите на иконку в строке меню и выберите "Quit"
+1. Build and run the application in Xcode
+2. Look for the server icon in the menu bar
+3. The HTTP server will automatically start on port 8888
+4. Use the API endpoint for transcription: `http://localhost:8888/v1/audio/transcriptions`
+5. To exit the application, click on the menu bar icon and select "Quit"
 
-## Пример использования Whisper API
+## Example of Using the Whisper API
 
-Для транскрипции аудио:
+For audio transcription:
 
 ```bash
 curl -X POST http://localhost:8888/v1/audio/transcriptions \
@@ -30,22 +30,22 @@ curl -X POST http://localhost:8888/v1/audio/transcriptions \
   -F response_format=json
 ```
 
-Поддерживаемые параметры:
-- `file` - файл аудио (обязательный)
-- `model` - идентификатор модели (поддерживается только "whisper-1")
-- `prompt` - текст для управления стилем транскрипции
-- `response_format` - формат ответа (json, text, srt, vtt, verbose_json)
-- `temperature` - температура сэмплирования от 0 до 1
-- `language` - язык ввода (ISO-639-1)
+Supported parameters:
+- `file` - audio file (required)
+- `model` - model identifier (only "whisper-1" is supported)
+- `prompt` - text to guide the transcription style
+- `response_format` - response format (json, text, srt, vtt, verbose_json)
+- `temperature` - sampling temperature from 0 to 1
+- `language` - input language (ISO-639-1)
 
-## Форматы ответов
+## Response Formats
 
-Сервер поддерживает следующие форматы ответов:
+The server supports the following response formats:
 
-1. **json** (по умолчанию):
+1. **json** (default):
 ```json
 {
-  "text": "Текст транскрипции."
+  "text": "Transcription text."
 }
 ```
 
@@ -55,59 +55,59 @@ curl -X POST http://localhost:8888/v1/audio/transcriptions \
   "task": "transcribe",
   "language": "en",
   "duration": 10.5,
-  "text": "Полный текст транскрипции.",
+  "text": "Full transcription text.",
   "segments": [
     {
       "id": 0,
       "seek": 0,
       "start": 0.0,
       "end": 5.0,
-      "text": "Первый сегмент.",
+      "text": "First segment.",
       "tokens": [50364, 13, 11, 263, 6116],
       "temperature": 0.0,
       "avg_logprob": -0.45,
       "compression_ratio": 1.275,
       "no_speech_prob": 0.1
     },
-    // Другие сегменты...
+    // Other segments...
   ]
 }
 ```
 
-3. **text**: Простой текстовый вывод
+3. **text**: Simple text output
 
-4. **srt**: Формат субтитров SubRip
+4. **srt**: SubRip subtitle format
 
-5. **vtt**: Формат субтитров WebVTT
+5. **vtt**: WebVTT subtitle format
 
-## Технические детали
+## Technical Details
 
-- Приложение использует современный Network framework для создания HTTP-сервера
-- Для порта по умолчанию используется значение 8888
-- Не отображается окно — приложение работает полностью в фоновом режиме
-- Оптимизированная архитектура кода для простоты поддержки
+- The application uses the modern Network framework to create an HTTP server
+- The default port value is 8888
+- No window is displayed — the application works completely in the background
+- Optimized code architecture for easy maintenance
 
-## Архитектура кода
+## Code Architecture
 
-Проект разделен на следующие основные компоненты:
+The project is divided into the following main components:
 
-- **WhisperServerApp.swift**: Точка входа в приложение SwiftUI и AppDelegate
-- **SimpleHTTPServer.swift**: Реализация HTTP-сервера с поддержкой Whisper API
-- **ContentView.swift**: Заполнитель SwiftUI, не отображается пользователю
-- **Info.plist**: Конфигурация приложения и сетевые разрешения
+- **WhisperServerApp.swift**: SwiftUI application entry point and AppDelegate
+- **SimpleHTTPServer.swift**: HTTP server implementation with Whisper API support
+- **ContentView.swift**: SwiftUI placeholder, not displayed to the user
+- **Info.plist**: Application configuration and network permissions
 
-## Требования
+## Requirements
 
-- macOS 11.0 или новее
-- Xcode 13.0 или новее (для сборки)
+- macOS 11.0 or newer
+- Xcode 13.0 or newer (for building)
 
-## Устранение неполадок
+## Troubleshooting
 
-Если у вас возникли проблемы с подключением к серверу:
+If you have problems connecting to the server:
 
-1. Убедитесь, что приложение запущено (иконка в строке меню)
-2. Проверьте, не блокирует ли брандмауэр порт 8888
-3. Проверьте, нет ли других приложений, использующих порт 8888
-4. Если сервер не отвечает, перезапустите приложение
+1. Make sure the application is running (icon in the menu bar)
+2. Check if the firewall is blocking port 8888
+3. Check if there are other applications using port 8888
+4. If the server is not responding, restart the application
 
-Для подробных логов запустите приложение из Xcode и смотрите консоль. 
+For detailed logs, run the application from Xcode and watch the console. 
