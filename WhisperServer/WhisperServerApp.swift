@@ -82,29 +82,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         
         menu.addItem(NSMenuItem.separator())
         
-        // API endpoints info
-        let apiInfoItem = NSMenuItem(title: "API Endpoint", action: nil, keyEquivalent: "")
-        apiInfoItem.isEnabled = false
-        menu.addItem(apiInfoItem)
-        
-        // Transcription endpoint
-        let transcriptionEndpoint = NSMenuItem(title: "   /v1/audio/transcriptions", action: #selector(copyTranscriptionURL), keyEquivalent: "")
-        menu.addItem(transcriptionEndpoint)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        // Sample command
-        let sampleCommandItem = NSMenuItem(title: "Copy sample curl command", action: #selector(copySampleCommand), keyEquivalent: "")
-        menu.addItem(sampleCommandItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        // Documentation
-        let docsItem = NSMenuItem(title: "Documentation", action: #selector(openDocs), keyEquivalent: "")
-        menu.addItem(docsItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
         // Quit menu item
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitClicked), keyEquivalent: "q"))
         
@@ -147,34 +124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
     
     // MARK: - Action Methods
-    
-    /// Copies the transcription endpoint URL to clipboard
-    @objc private func copyTranscriptionURL() {
-        let url = "http://localhost:\(serverPort)/v1/audio/transcriptions"
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url, forType: .string)
-    }
-    
-    /// Copies a sample curl command to clipboard
-    @objc private func copySampleCommand() {
-        let command = """
-        curl -X POST http://localhost:\(serverPort)/v1/audio/transcriptions \\
-          -F file=@/path/to/audio.mp3 \\
-          -F model=whisper-1 \\
-          -F response_format=json \\
-          -F language=en \\
-          -F prompt="Transcript the following audio:"
-        """
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(command, forType: .string)
-    }
-    
-    /// Opens documentation URL
-    @objc private func openDocs() {
-        if let url = URL(string: "https://platform.openai.com/docs/api-reference/audio") {
-            NSWorkspace.shared.open(url)
-        }
-    }
     
     /// Quits the application
     @objc private func quitClicked() {
