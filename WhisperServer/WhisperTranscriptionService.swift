@@ -14,7 +14,7 @@ struct WhisperTranscriptionService {
         let modelFilename = "ggml-base.en.bin"
         
         // Find the model
-        guard let modelURL = findResourceFile(named: modelFilename, inSubdirectory: "models") else {
+        guard let modelURL = Bundle.main.url(forResource: "ggml-base.en", withExtension: "bin", subdirectory: "models") else {
             print("❌ Failed to find Whisper model")
             return nil
         }
@@ -58,6 +58,7 @@ struct WhisperTranscriptionService {
             }
         }
         
+        // Use available CPU cores efficiently
         params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
         
         // Convert audio to samples for Whisper
@@ -85,29 +86,6 @@ struct WhisperTranscriptionService {
         return transcription
     }
     
-    /// Searches for a file in application resources
-    private static func findResourceFile(named filename: String, inSubdirectory subdirectory: String? = nil) -> URL? {
-        let components = filename.split(separator: ".")
-        let name = String(components.first ?? "")
-        let ext = components.count > 1 ? String(components.last!) : nil
-        
-        // First try bundle resources with subdirectory
-        if let url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: subdirectory) {
-            return url
-        }
-        
-        // Then try direct path in resources
-        if let resourceURL = Bundle.main.resourceURL {
-            let resourcePath = subdirectory != nil ? resourceURL.appendingPathComponent(subdirectory!) : resourceURL
-            let fileURL = resourcePath.appendingPathComponent(filename)
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                return fileURL
-            }
-        }
-        
-        return nil
-    }
-    
     /// Converts audio data to sample array for Whisper
     private static func convertAudioToSamples(_ audioData: Data) -> [Float] {
         // Check WAV header (RIFF)
@@ -117,12 +95,19 @@ struct WhisperTranscriptionService {
                     audioData[2] == 0x46 && // F
                     audioData[3] == 0x46    // F
         
+        // Check MP3 header
+        let isMp3 = audioData.count > 3 && 
+                    (audioData[0] == 0x49 && audioData[1] == 0x44 && audioData[2] == 0x33) || // ID3
+                    (audioData[0] == 0xFF && audioData[1] == 0xFB) // MP3 sync
+        
         if isWav {
-            print("✅ Detected WAV format audio")
+            print("✅ Processing WAV format audio")
             return convertWavDataToSamples(audioData)
+        } else if isMp3 {
+            print("⚠️ MP3 format detected but not directly supported. Converting as raw PCM")
+            return convertRawPCMToSamples(audioData)
         } else {
             print("⚠️ Unknown audio format, attempting to interpret as raw PCM")
-            // Simplified fallback - assume 16-bit PCM with no header
             return convertRawPCMToSamples(audioData)
         }
     }

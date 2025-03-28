@@ -49,6 +49,9 @@ final class SimpleHTTPServer {
     /// Queue for processing server operations
     private let serverQueue = DispatchQueue(label: "com.whisperserver.server", qos: .userInitiated)
     
+    /// Maximum request size (50 MB for large audio files)
+    private let maxRequestSize = 50 * 1024 * 1024
+    
     // MARK: - Initialization
     
     /// Creates a new instance of HTTP server
@@ -76,9 +79,33 @@ final class SimpleHTTPServer {
             // Create the listener
             listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: self.port)!)
             
-            // Configure handlers
-            configureStateHandler()
-            configureConnectionHandler()
+            // Configure state handler
+            listener?.stateUpdateHandler = { [weak self] state in
+                guard let self = self else { return }
+                
+                switch state {
+                case .ready:
+                    self.isRunning = true
+                    print("✅ HTTP server started on http://localhost:\(self.port)")
+                    print("   Whisper API available at: http://localhost:\(self.port)/v1/audio/transcriptions")
+                    
+                case .failed(let error):
+                    print("❌ HTTP server terminated with error: \(error.localizedDescription)")
+                    self.stop()
+                    
+                case .cancelled:
+                    self.isRunning = false
+                    
+                default:
+                    break
+                }
+            }
+            
+            // Configure connection handler
+            listener?.newConnectionHandler = { [weak self] connection in
+                guard let self = self else { return }
+                self.handleConnection(connection)
+            }
             
             // Start listening for connections
             listener?.start(queue: serverQueue)
@@ -98,49 +125,12 @@ final class SimpleHTTPServer {
         print("🛑 HTTP server stopped")
     }
     
-    // MARK: - Listener Configuration
-    
-    /// Configures state handler for the listener
-    private func configureStateHandler() {
-        listener?.stateUpdateHandler = { [weak self] state in
-            guard let self = self else { return }
-            
-            switch state {
-            case .ready:
-                self.isRunning = true
-                print("✅ HTTP server started on http://localhost:\(self.port)")
-                print("   Whisper API available at: http://localhost:\(self.port)/v1/audio/transcriptions")
-                
-            case .failed(let error):
-                print("❌ HTTP server terminated with error: \(error.localizedDescription)")
-                self.stop()
-                
-            case .cancelled:
-                self.isRunning = false
-                
-            default:
-                break
-            }
-        }
-    }
-    
-    /// Configures handler for new connections
-    private func configureConnectionHandler() {
-        listener?.newConnectionHandler = { [weak self] connection in
-            guard let self = self else { return }
-            self.handleConnection(connection)
-        }
-    }
-    
     // MARK: - Connection Handling
     
     /// Handles an incoming network connection
     /// - Parameter connection: New network connection
     private func handleConnection(_ connection: NWConnection) {
         print("📥 Received new connection")
-        
-        // Maximum request size (50 MB for large audio files)
-        let maxRequestSize = 50 * 1024 * 1024
         
         // Start the connection
         connection.start(queue: serverQueue)
@@ -166,8 +156,8 @@ final class SimpleHTTPServer {
             print("📥 Received \(data.count) bytes of data")
             
             // Check request size
-            if data.count > maxRequestSize {
-                print("⚠️ Exceeded maximum request size (\(maxRequestSize / 1024 / 1024) MB)")
+            if data.count > self.maxRequestSize {
+                print("⚠️ Exceeded maximum request size (\(self.maxRequestSize / 1024 / 1024) MB)")
                 self.sendErrorResponse(to: connection, message: "Request too large")
                 return
             }
@@ -190,11 +180,10 @@ final class SimpleHTTPServer {
     private func parseHTTPRequest(data: Data) -> [String: Any]? {
         print("🔍 Parsing HTTP request of size \(data.count) bytes")
         
-        // Find delimiter between headers and body (double CRLF: \r\n\r\n)
+        // Find delimiter between headers and body
         let doubleCRLF = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n as data
         
-        // Find boundary between headers and body
-        guard let headerEndIndex = find(pattern: doubleCRLF, in: data) else {
+        guard let headerEndIndex = data.range(of: doubleCRLF)?.lowerBound else {
             print("❌ Failed to find boundary between headers and body")
             return nil
         }
@@ -248,38 +237,6 @@ final class SimpleHTTPServer {
         ]
     }
     
-    /// Helper method to find pattern in data
-    /// - Parameters:
-    ///   - pattern: Pattern to search for
-    ///   - data: Data to search in
-    /// - Returns: Start index of found pattern or nil if pattern not found
-    private func find(pattern: Data, in data: Data) -> Int? {
-        guard !pattern.isEmpty, !data.isEmpty, pattern.count <= data.count else { 
-            return nil 
-        }
-        
-        let patternLength = pattern.count
-        let dataLength = data.count
-        let lastPossibleIndex = dataLength - patternLength
-        
-        for i in 0...lastPossibleIndex {
-            var matched = true
-            
-            for j in 0..<patternLength {
-                if data[i + j] != pattern[j] {
-                    matched = false
-                    break
-                }
-            }
-            
-            if matched {
-                return i
-            }
-        }
-        
-        return nil
-    }
-    
     /// Routes request to corresponding handler based on path
     /// - Parameters:
     ///   - connection: Network connection
@@ -325,19 +282,12 @@ final class SimpleHTTPServer {
         
         // Create request based on content type
         let contentType = headers["Content-Type"] ?? ""
-        var whisperRequest: WhisperAPIRequest
+        var whisperRequest = WhisperAPIRequest()
         
         if contentType.starts(with: "multipart/form-data") {
             whisperRequest = parseMultipartFormData(data: body, contentType: contentType)
-            
-            // Fallback to direct parsing if needed
-            if !whisperRequest.isValid && body.count > 1000 {
-                whisperRequest = parseAudioDataDirectly(from: body, contentType: contentType)
-            }
         } else {
-            var request = WhisperAPIRequest()
-            request.audioData = body
-            whisperRequest = request
+            whisperRequest.audioData = body
         }
         
         if !whisperRequest.isValid {
@@ -360,7 +310,7 @@ final class SimpleHTTPServer {
             
             // Check if connection is still active
             if case .cancelled = connection.state { return }
-            if case .failed(_) = connection.state { return }
+            if case .failed = connection.state { return }
             
             DispatchQueue.main.async {
                 if let transcription = transcription {
@@ -382,30 +332,6 @@ final class SimpleHTTPServer {
         }
     }
     
-    /// Alternative method for direct extraction of audio data from request
-    private func parseAudioDataDirectly(from body: Data, contentType: String) -> WhisperAPIRequest {
-        var request = WhisperAPIRequest()
-        
-        // Check for WAV header
-        if body.count > 12, body[0] == 0x52, body[1] == 0x49, body[2] == 0x46, body[3] == 0x46 {
-            request.audioData = body
-            print("✅ Found WAV data directly in body")
-        } 
-        // Check for MP3 header
-        else if body.count > 3, (body[0] == 0x49 && body[1] == 0x44 && body[2] == 0x33) || 
-                (body[0] == 0xFF && body[1] == 0xFB) {
-            request.audioData = body
-            print("✅ Found MP3 data directly in body")
-        }
-        // Assume raw audio data
-        else if body.count > 1000 {
-            request.audioData = body
-            print("⚠️ Assuming raw audio data in body")
-        }
-        
-        return request
-    }
-    
     // MARK: - Processing multipart/form-data
     
     /// Parses multipart/form-data content
@@ -413,104 +339,131 @@ final class SimpleHTTPServer {
         var request = WhisperAPIRequest()
         
         // Extract boundary from Content-Type
-        let boundaryComponents = contentType.components(separatedBy: "boundary=")
-        guard boundaryComponents.count > 1 else {
+        guard let boundaryRange = contentType.range(of: "boundary=") else {
             print("❌ Boundary not found in Content-Type")
             return request
         }
         
-        // Extract boundary
-        var boundary = boundaryComponents[1]
-        if boundary.contains(";") {
-            boundary = boundary.components(separatedBy: ";")[0]
+        var boundary = String(contentType[boundaryRange.upperBound...])
+        if let semicolonIndex = boundary.firstIndex(of: ";") {
+            boundary = String(boundary[..<semicolonIndex])
         }
+        boundary = boundary.trimmingCharacters(in: .whitespaces)
         if boundary.hasPrefix("\"") && boundary.hasSuffix("\"") {
             boundary = String(boundary.dropFirst().dropLast())
         }
         
         // Create boundary data
-        let fullBoundaryString = "--\(boundary)"
-        let endBoundaryString = "--\(boundary)--"
-        
-        guard let fullBoundary = fullBoundaryString.data(using: .utf8),
-              let endBoundary = endBoundaryString.data(using: .utf8) else {
-            print("❌ Failed to create boundaries as data")
+        let fullBoundary = "--\(boundary)"
+        guard let boundaryData = fullBoundary.data(using: .utf8),
+              let doubleCRLF = "\r\n\r\n".data(using: .utf8) else {
             return request
         }
         
-        // Find all boundary positions
-        var boundaryPositions: [Int] = []
-        var currentPosition = 0
-        
-        while currentPosition < data.count - fullBoundary.count {
-            if let nextPosition = find(pattern: fullBoundary, in: data.subdata(in: currentPosition..<data.count)) {
-                let absolutePosition = currentPosition + nextPosition
-                boundaryPositions.append(absolutePosition)
-                currentPosition = absolutePosition + fullBoundary.count
-            } else {
+        // Split data by boundary
+        var currentPos = 0
+        while currentPos < data.count {
+            // Find next boundary
+            guard let boundaryPos = findNextPosition(of: boundaryData, in: data, startingAt: currentPos),
+                  boundaryPos + boundaryData.count + 2 < data.count else {
                 break
             }
-        }
-        
-        // Check for end boundary
-        if let endBoundaryPosition = find(pattern: endBoundary, in: data) {
-            boundaryPositions.append(endBoundaryPosition)
-        }
-        
-        guard boundaryPositions.count > 1 else {
-            print("❌ Insufficient boundaries found in data")
-            return request
-        }
-        
-        // Process each part between boundaries
-        for i in 0..<(boundaryPositions.count - 1) {
-            let partStart = boundaryPositions[i] + fullBoundary.count + 2 // +2 for \r\n after boundary
-            let partEnd = boundaryPositions[i + 1]
             
-            if partStart >= partEnd || partStart >= data.count { continue }
+            // Move past boundary and CRLF
+            let partStart = boundaryPos + boundaryData.count + 2
             
-            let partData = data.subdata(in: partStart..<partEnd)
-            
-            // Find headers/content delimiter
-            let doubleCRLF = Data([0x0D, 0x0A, 0x0D, 0x0A])
-            guard let headerEndIndex = find(pattern: doubleCRLF, in: partData) else { continue }
-            
-            // Parse headers
-            let headersData = partData.prefix(headerEndIndex)
-            guard let headersString = String(data: headersData, encoding: .utf8) else { continue }
-            
-            var headers: [String: String] = [:]
-            let headerLines = headersString.components(separatedBy: "\r\n")
-            for line in headerLines where !line.isEmpty {
-                let headerComponents = line.components(separatedBy: ": ")
-                if headerComponents.count >= 2 {
-                    headers[headerComponents[0]] = headerComponents.dropFirst().joined(separator: ": ")
-                }
+            // Find headers end
+            guard let headersEnd = findNextPosition(of: doubleCRLF, in: data, startingAt: partStart) else {
+                currentPos = partStart
+                continue
             }
             
-            // Extract field information
+            // Parse headers
+            let headersData = data.subdata(in: partStart..<headersEnd)
+            guard let headersString = String(data: headersData, encoding: .utf8) else {
+                currentPos = headersEnd + doubleCRLF.count
+                continue
+            }
+            
+            // Extract field name
+            let headers = parsePartHeaders(headersString)
             guard let contentDisposition = headers["Content-Disposition"],
-                  let fieldName = extractFieldName(from: contentDisposition) else { continue }
+                  let fieldName = extractFieldName(from: contentDisposition) else {
+                currentPos = headersEnd + doubleCRLF.count
+                continue
+            }
             
-            // Extract content
-            let contentStartIndex = headerEndIndex + doubleCRLF.count
-            guard contentStartIndex < partData.count else { continue }
+            // Look for next boundary to find content end
+            let contentStart = headersEnd + doubleCRLF.count
+            let nextBoundaryPos = findNextPosition(of: boundaryData, in: data, startingAt: contentStart) ?? data.count
             
-            let contentData = partData.subdata(in: contentStartIndex..<partData.count)
-            processFieldContent(fieldName: fieldName, data: contentData, request: &request)
+            // Extract content (removing trailing CRLF if present)
+            let contentEnd = nextBoundaryPos >= 2 && data[nextBoundaryPos-2] == 0x0D && data[nextBoundaryPos-1] == 0x0A
+                ? nextBoundaryPos - 2 : nextBoundaryPos
+            
+            if contentStart < contentEnd {
+                let content = data.subdata(in: contentStart..<contentEnd)
+                processFieldContent(fieldName: fieldName, data: content, request: &request)
+            }
+            
+            currentPos = nextBoundaryPos
         }
         
         return request
     }
     
+    /// Finds the next position of pattern in data
+    private func findNextPosition(of pattern: Data, in data: Data, startingAt: Int) -> Int? {
+        guard startingAt < data.count, !pattern.isEmpty, pattern.count <= data.count - startingAt else { 
+            return nil 
+        }
+        
+        let endIndex = data.count - pattern.count + 1
+        for i in startingAt..<endIndex {
+            var matches = true
+            for j in 0..<pattern.count {
+                if data[i + j] != pattern[j] {
+                    matches = false
+                    break
+                }
+            }
+            if matches {
+                return i
+            }
+        }
+        return nil
+    }
+    
+    /// Parses part headers into dictionary
+    private func parsePartHeaders(_ headersString: String) -> [String: String] {
+        var headers: [String: String] = [:]
+        let lines = headersString.components(separatedBy: "\r\n")
+        
+        for line in lines {
+            guard !line.isEmpty else { continue }
+            
+            let components = line.components(separatedBy: ": ")
+            if components.count >= 2 {
+                let name = components[0]
+                let value = components.dropFirst().joined(separator: ": ")
+                headers[name] = value
+            }
+        }
+        
+        return headers
+    }
+    
     /// Extracts field name from Content-Disposition header
     private func extractFieldName(from contentDisposition: String) -> String? {
-        guard let nameMatch = contentDisposition.range(of: "name=\"([^\"]+)\"", options: .regularExpression) else {
+        guard let nameRange = contentDisposition.range(of: "name=\"", options: .caseInsensitive) else {
             return nil
         }
         
-        let nameStart = contentDisposition.index(nameMatch.lowerBound, offsetBy: 6)
-        let nameEnd = contentDisposition.index(nameMatch.upperBound, offsetBy: -1)
+        let nameStart = nameRange.upperBound
+        guard let nameEnd = contentDisposition[nameStart...].firstIndex(of: "\"") else {
+            return nil
+        }
+        
         return String(contentDisposition[nameStart..<nameEnd])
     }
     
@@ -570,8 +523,7 @@ final class SimpleHTTPServer {
             statusCode: 200,
             statusMessage: "OK",
             contentType: contentType,
-            body: responseBody,
-            onSuccess: { print("✅ Transcription response sent successfully") }
+            body: responseBody
         )
     }
     
@@ -584,17 +536,15 @@ final class SimpleHTTPServer {
     private func createResponseBody(format: ResponseFormat, text: String, temperature: Double = 0.0) -> (contentType: String, body: String) {
         switch format {
         case .json:
-            let jsonResponse: [String: Any] = ["text": text]
-            
-            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
-                return ("application/json", jsonString)
-            } else {
-                return ("application/json", "{\"text\": \"Error creating JSON response\"}")
+            let jsonResponse = ["text": text]
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
+                  let jsonString = String(data: jsonData, encoding: .utf8) else {
+                return ("application/json", "{\"text\": \"\(text)\"}")
             }
+            return ("application/json", jsonString)
             
         case .verbose_json:
-            // Split text into segments for example
+            // Split text into segments
             let words = text.components(separatedBy: " ")
             let halfIndex = max(1, words.count / 2)
             let firstSegment = words[0..<halfIndex].joined(separator: " ")
@@ -630,25 +580,25 @@ final class SimpleHTTPServer {
                 ]
             ]
             
-            if let jsonData = try? JSONSerialization.data(withJSONObject: verboseResponse),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
-                return ("application/json", jsonString)
-            } else {
-                return ("application/json", "{\"text\": \"Error creating verbose JSON response\"}")
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: verboseResponse),
+                  let jsonString = String(data: jsonData, encoding: .utf8) else {
+                return ("application/json", "{\"text\": \"\(text)\"}")
             }
+            return ("application/json", jsonString)
             
         case .text:
             return ("text/plain", text)
             
         case .srt:
-            // Split text into segments for creating subtitles
+            // Create SRT subtitle format
+            let estimatedDuration = Double(text.count) / 20.0
+            let midpoint = estimatedDuration / 2.0
+            
+            // Split text for subtitles
             let words = text.components(separatedBy: " ")
             let halfIndex = max(1, words.count / 2)
             let firstSegment = words[0..<halfIndex].joined(separator: " ")
             let secondSegment = words[halfIndex..<words.count].joined(separator: " ")
-            
-            let estimatedDuration = Double(text.count) / 20.0
-            let midpoint = estimatedDuration / 2.0
             
             let srtText = """
             1
@@ -662,14 +612,15 @@ final class SimpleHTTPServer {
             return ("text/plain", srtText)
             
         case .vtt:
-            // Split text into segments for creating subtitles
+            // Create VTT subtitle format
+            let estimatedDuration = Double(text.count) / 20.0
+            let midpoint = estimatedDuration / 2.0
+            
+            // Split text for subtitles
             let words = text.components(separatedBy: " ")
             let halfIndex = max(1, words.count / 2)
             let firstSegment = words[0..<halfIndex].joined(separator: " ")
             let secondSegment = words[halfIndex..<words.count].joined(separator: " ")
-            
-            let estimatedDuration = Double(text.count) / 20.0
-            let midpoint = estimatedDuration / 2.0
             
             let vttText = """
             WEBVTT
@@ -689,39 +640,39 @@ final class SimpleHTTPServer {
     ///   - connection: Network connection
     ///   - message: Error message
     private func sendErrorResponse(to connection: NWConnection, message: String) {
-        let errorResponse: [String: Any] = [
+        let errorResponse = [
             "error": [
                 "message": message,
                 "type": "invalid_request_error"
             ]
         ]
         
-        var responseBody = "{\"error\": {\"message\": \"Server error\"}}"
-        if let jsonData = try? JSONSerialization.data(withJSONObject: errorResponse),
-           let jsonString = String(data: jsonData, encoding: .utf8) {
-            responseBody = jsonString
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: errorResponse),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            let fallbackResponse = "{\"error\": {\"message\": \"\(message)\"}}"
+            sendHTTPResponse(to: connection, statusCode: 400, statusMessage: "Bad Request", 
+                            contentType: "application/json", body: fallbackResponse)
+            return
         }
         
-        self.sendHTTPResponse(
+        sendHTTPResponse(
             to: connection,
             statusCode: 400,
             statusMessage: "Bad Request",
             contentType: "application/json",
-            body: responseBody,
-            onSuccess: { print("✅ Error response sent") }
+            body: jsonString
         )
     }
     
     /// Sends standard "OK" response
     /// - Parameter connection: Connection for sending response
     private func sendDefaultResponse(to connection: NWConnection) {
-        self.sendHTTPResponse(
+        sendHTTPResponse(
             to: connection,
             statusCode: 200,
             statusMessage: "OK",
             contentType: "text/plain",
-            body: "OK",
-            onSuccess: { print("✅ Standard response sent") }
+            body: "OK"
         )
     }
     
@@ -732,18 +683,16 @@ final class SimpleHTTPServer {
     ///   - statusMessage: HTTP status message
     ///   - contentType: Content type
     ///   - body: Response body
-    ///   - onSuccess: Closure called on successful sending
     private func sendHTTPResponse(
         to connection: NWConnection,
         statusCode: Int,
         statusMessage: String,
         contentType: String,
-        body: String,
-        onSuccess: @escaping () -> Void
+        body: String
     ) {
         // Check connection state first
         if case .cancelled = connection.state { return }
-        if case .failed(_) = connection.state { return }
+        if case .failed = connection.state { return }
         
         let contentLength = body.utf8.count
         let response = """
@@ -759,7 +708,7 @@ final class SimpleHTTPServer {
             if let error = error {
                 print("❌ Response sending error: \(error.localizedDescription)")
             } else {
-                onSuccess()
+                print("✅ Response sent successfully")
             }
             
             // Close connection after a short delay

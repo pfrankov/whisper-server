@@ -7,13 +7,11 @@
 
 import SwiftUI
 
-/// A placeholder view for the application
-/// This view is not actually displayed to the user since the app is menu bar only,
-/// but it's required as part of the SwiftUI app structure.
+/// A placeholder view for the application (not displayed as app is menu bar only)
 struct ContentView: View {
     var body: some View {
         VStack(spacing: 20) {
-            Image(systemName: "server.rack")
+            Image(systemName: "waveform")
                 .font(.system(size: 72))
                 .foregroundColor(.accentColor)
             
@@ -21,14 +19,11 @@ struct ContentView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
             
-            Text("HTTP Server is running")
+            Text("Running as menu bar app")
                 .font(.title3)
-            
-            Text("The app runs in the menu bar")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+        .frame(width: 300, height: 200)
     }
 }
 

@@ -37,10 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Make app appear only in menu bar (no dock icon)
         NSApp.setActivationPolicy(.accessory)
         
-        // Setup UI
         setupStatusItem()
-        
-        // Start server
         startServer()
     }
     
