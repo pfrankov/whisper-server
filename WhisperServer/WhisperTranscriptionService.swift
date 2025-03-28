@@ -88,6 +88,9 @@ struct WhisperTranscriptionService {
     
     /// Converts audio data to sample array for Whisper
     private static func convertAudioToSamples(_ audioData: Data) -> [Float] {
+        // Perform detailed analysis of the audio format
+        print("🔍 Analyzing audio data of size \(audioData.count) bytes")
+        
         // Check WAV header (RIFF)
         let isWav = audioData.count > 12 && 
                     audioData[0] == 0x52 && // R
@@ -100,26 +103,43 @@ struct WhisperTranscriptionService {
                     (audioData[0] == 0x49 && audioData[1] == 0x44 && audioData[2] == 0x33) || // ID3
                     (audioData[0] == 0xFF && audioData[1] == 0xFB) // MP3 sync
         
+        // Debug first few bytes
+        let previewLength = min(16, audioData.count)
+        let bytesPreview = audioData.prefix(previewLength).map { String(format: "%02X", $0) }.joined(separator: " ")
+        print("🔍 First \(previewLength) bytes: \(bytesPreview)")
+        
         if isWav {
             print("✅ Processing WAV format audio")
-            return convertWavDataToSamples(audioData)
+            let samples = convertWavDataToSamples(audioData)
+            print("✅ Converted WAV data to \(samples.count) samples")
+            if samples.isEmpty {
+                print("⚠️ WAV conversion resulted in 0 samples, attempting raw PCM conversion")
+                return convertRawPCMToSamples(audioData)
+            }
+            return samples
         } else if isMp3 {
             print("⚠️ MP3 format detected but not directly supported. Converting as raw PCM")
-            return convertRawPCMToSamples(audioData)
+            let samples = convertRawPCMToSamples(audioData)
+            print("✅ Converted MP3 data to \(samples.count) samples using raw PCM approach")
+            return samples
         } else {
             print("⚠️ Unknown audio format, attempting to interpret as raw PCM")
-            return convertRawPCMToSamples(audioData)
+            let samples = convertRawPCMToSamples(audioData)
+            print("✅ Converted unknown format to \(samples.count) samples using raw PCM approach")
+            return samples
         }
     }
     
     /// Converts WAV data to sample array
     private static func convertWavDataToSamples(_ audioData: Data) -> [Float] {
         return audioData.withUnsafeBytes { rawBufferPointer -> [Float] in
-            let header = 44 // Standard WAV header size
+            let headerSize = findWavDataChunk(audioData)
             let bytesPerSample = 2 // 16-bit PCM
             
-            guard audioData.count > header + bytesPerSample else {
-                print("❌ WAV file too short")
+            print("🔍 WAV header size detected as \(headerSize) bytes")
+            
+            guard headerSize > 0 && audioData.count > headerSize + bytesPerSample else {
+                print("❌ WAV file invalid or too short: header=\(headerSize), total size=\(audioData.count)")
                 return []
             }
             
@@ -127,10 +147,12 @@ struct WhisperTranscriptionService {
                 return []
             }
             
-            let dataPtr = baseAddress.advanced(by: header)
+            let dataPtr = baseAddress.advanced(by: headerSize)
             let int16Ptr = dataPtr.assumingMemoryBound(to: Int16.self)
             
-            let numSamples = (audioData.count - header) / bytesPerSample
+            let numSamples = (audioData.count - headerSize) / bytesPerSample
+            print("🔍 Creating \(numSamples) samples from WAV data")
+            
             var samples = [Float](repeating: 0, count: numSamples)
             
             for i in 0..<numSamples {
@@ -139,6 +161,41 @@ struct WhisperTranscriptionService {
             
             return samples
         }
+    }
+    
+    /// Finds the actual start of audio data in a WAV file by looking for the 'data' chunk
+    private static func findWavDataChunk(_ audioData: Data) -> Int {
+        // Standard WAV header is 44 bytes, but we'll search for the 'data' chunk to be sure
+        guard audioData.count >= 44 else { return 0 }
+        
+        // Try the standard position first (most common case)
+        if audioData.count >= 44 + 4 &&
+           audioData[36] == 0x64 && // d
+           audioData[37] == 0x61 && // a
+           audioData[38] == 0x74 && // t
+           audioData[39] == 0x61 {  // a
+            // Get the data chunk size (4 bytes after 'data')
+            let chunkSizeBytes = [audioData[40], audioData[41], audioData[42], audioData[43]]
+            let chunkSize = UInt32(chunkSizeBytes[0]) | (UInt32(chunkSizeBytes[1]) << 8) | 
+                           (UInt32(chunkSizeBytes[2]) << 16) | (UInt32(chunkSizeBytes[3]) << 24)
+            print("🔍 Found standard WAV header with data chunk size: \(chunkSize) bytes")
+            return 44
+        }
+        
+        // Search for the 'data' chunk in the file
+        for i in 12..<(audioData.count - 8) {
+            if audioData[i] == 0x64 && // d
+               audioData[i+1] == 0x61 && // a
+               audioData[i+2] == 0x74 && // t
+               audioData[i+3] == 0x61 {  // a
+                let headerSize = i + 8 // Skip 'data' + 4 bytes of chunk size
+                print("🔍 Found WAV data chunk at offset \(i), header size: \(headerSize)")
+                return headerSize
+            }
+        }
+        
+        print("⚠️ Could not find 'data' chunk in WAV file, using standard 44-byte header")
+        return 44 // Default to standard WAV header if we can't find the data chunk
     }
     
     /// Interprets audio data as raw PCM

@@ -135,40 +135,91 @@ final class SimpleHTTPServer {
         // Start the connection
         connection.start(queue: serverQueue)
         
-        // Configure data reception handler
-        connection.receive(minimumIncompleteLength: 1, maximumLength: maxRequestSize) { [weak self] data, _, isComplete, error in
-            guard let self = self else { return }
-            
-            // Error handling
-            if let error = error {
-                print("❌ Error receiving data: \(error.localizedDescription)")
-                connection.cancel()
-                return
+        // Keep track of accumulated data
+        var receivedData = Data()
+        var expectedContentLength: Int?
+        var headersParsed = false
+        
+        // Function to read more data from the connection
+        func receiveMoreData() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+                guard let self = self else { return }
+                
+                // Error handling
+                if let error = error {
+                    print("❌ Error receiving data: \(error.localizedDescription)")
+                    connection.cancel()
+                    return
+                }
+                
+                // Handle received data
+                if let data = data, !data.isEmpty {
+                    print("📥 Received \(data.count) bytes of data (total: \(receivedData.count + data.count))")
+                    receivedData.append(data)
+                    
+                    // Parse headers if we haven't yet
+                    if !headersParsed, let headerEndIndex = receivedData.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A]))?.lowerBound {
+                        headersParsed = true
+                        expectedContentLength = self.extractContentLength(from: receivedData[0..<headerEndIndex])
+                    }
+                    
+                    // Check request size limit
+                    if receivedData.count > self.maxRequestSize {
+                        print("⚠️ Exceeded maximum request size (\(self.maxRequestSize / 1024 / 1024) MB)")
+                        self.sendErrorResponse(to: connection, message: "Request too large")
+                        return
+                    }
+                }
+                
+                // Determine if request is complete
+                let isRequestComplete = isComplete || 
+                                     (expectedContentLength != nil && receivedData.count >= expectedContentLength!)
+                
+                if isRequestComplete && !receivedData.isEmpty {
+                    // Process the complete request
+                    print("✅ Received complete request of \(receivedData.count) bytes")
+                    self.processReceivedData(receivedData, connection: connection)
+                } else if isComplete && receivedData.isEmpty {
+                    print("⚠️ Received empty request")
+                    self.sendDefaultResponse(to: connection)
+                } else {
+                    // Need to receive more data
+                    receiveMoreData()
+                }
             }
-            
-            // Check for data presence
-            guard let data = data, !data.isEmpty else {
-                print("⚠️ Received empty data")
-                self.sendDefaultResponse(to: connection)
-                return
+        }
+        
+        // Start receiving data
+        receiveMoreData()
+    }
+    
+    // Helper method to extract Content-Length from headers data
+    private func extractContentLength(from headersData: Data) -> Int? {
+        guard let headersString = String(data: headersData, encoding: .utf8) else { return nil }
+        
+        print("📋 Parsed HTTP headers: \(headersString.count) bytes")
+        
+        let headerLines = headersString.components(separatedBy: "\r\n")
+        for line in headerLines {
+            if line.lowercased().starts(with: "content-length:") {
+                let value = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
+                let length = Int(value)
+                print("📋 Content-Length detected: \(length ?? 0) bytes")
+                return length
             }
-            
-            print("📥 Received \(data.count) bytes of data")
-            
-            // Check request size
-            if data.count > self.maxRequestSize {
-                print("⚠️ Exceeded maximum request size (\(self.maxRequestSize / 1024 / 1024) MB)")
-                self.sendErrorResponse(to: connection, message: "Request too large")
-                return
-            }
-            
-            // Process HTTP request
-            if let request = self.parseHTTPRequest(data: data) {
-                self.routeRequest(connection: connection, request: request)
-            } else {
-                print("⚠️ Failed to parse HTTP request")
-                self.sendDefaultResponse(to: connection)
-            }
+        }
+        
+        return nil
+    }
+    
+    // Helper method to process received data
+    private func processReceivedData(_ data: Data, connection: NWConnection) {
+        // Process HTTP request
+        if let request = self.parseHTTPRequest(data: data) {
+            self.routeRequest(connection: connection, request: request)
+        } else {
+            print("⚠️ Failed to parse HTTP request")
+            self.sendDefaultResponse(to: connection)
         }
     }
     
@@ -276,31 +327,38 @@ final class SimpleHTTPServer {
             !body.isEmpty
         else {
             print("❌ Invalid request: missing headers or body")
+            self.logRequestDebugInfo(request)
             self.sendErrorResponse(to: connection, message: "Invalid request")
             return
         }
         
         // Create request based on content type
-        let contentType = headers["Content-Type"] ?? ""
+        let contentType = self.getContentTypeHeader(from: headers)
         var whisperRequest = WhisperAPIRequest()
         
-        if contentType.starts(with: "multipart/form-data") {
+        // Check for multipart/form-data in a case-insensitive way
+        if contentType.lowercased().contains("multipart/form-data") {
+            print("📋 Processing multipart/form-data request of size \(body.count) bytes")
             whisperRequest = parseMultipartFormData(data: body, contentType: contentType)
         } else {
+            print("📋 Processing raw body as audio data")
             whisperRequest.audioData = body
         }
         
         if !whisperRequest.isValid {
             print("❌ Error: Request does not contain valid audio data")
+            print("💾 Body size: \(body.count) bytes")
             self.sendErrorResponse(to: connection, message: "Invalid request: Missing audio file")
             return
         }
+        
+        print("✅ Successfully extracted audio data of size \(whisperRequest.audioData?.count ?? 0) bytes")
         
         // Perform transcription in background
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
-            print("🔄 Starting transcription of audio of size \(whisperRequest.audioData!.count) bytes")
+            print("🔄 Starting transcription of audio")
             
             let transcription = WhisperTranscriptionService.transcribeAudioData(
                 whisperRequest.audioData!,
@@ -332,6 +390,29 @@ final class SimpleHTTPServer {
         }
     }
     
+    // Helper method to log request debug info
+    private func logRequestDebugInfo(_ request: [String: Any]) {
+        if let headers = request["headers"] {
+            print("📋 Headers type: \(type(of: headers))")
+        } else {
+            print("📋 No 'headers' key found in request")
+        }
+        
+        if let body = request["body"] {
+            print("📋 Body type: \(type(of: body)), length: \(String(describing: (body as? Data)?.count ?? 0))")
+        } else {
+            print("📋 No 'body' key found in request")
+        }
+    }
+    
+    // Helper method to get content type header (case-insensitive)
+    private func getContentTypeHeader(from headers: [String: String]) -> String {
+        let contentTypeHeader = headers.keys.first(where: { $0.lowercased() == "content-type" })
+        let contentType = contentTypeHeader.flatMap { headers[$0] } ?? ""
+        print("📋 Content-Type: \(contentType)")
+        return contentType
+    }
+    
     // MARK: - Processing multipart/form-data
     
     /// Parses multipart/form-data content
@@ -339,99 +420,158 @@ final class SimpleHTTPServer {
         var request = WhisperAPIRequest()
         
         // Extract boundary from Content-Type
-        guard let boundaryRange = contentType.range(of: "boundary=") else {
-            print("❌ Boundary not found in Content-Type")
+        guard let boundary = extractBoundary(from: contentType) else {
+            print("❌ Failed to extract boundary from Content-Type: \(contentType)")
             return request
         }
         
-        var boundary = String(contentType[boundaryRange.upperBound...])
-        if let semicolonIndex = boundary.firstIndex(of: ";") {
-            boundary = String(boundary[..<semicolonIndex])
-        }
-        boundary = boundary.trimmingCharacters(in: .whitespaces)
-        if boundary.hasPrefix("\"") && boundary.hasSuffix("\"") {
-            boundary = String(boundary.dropFirst().dropLast())
-        }
+        print("📋 Extracted boundary: \"\(boundary)\"")
         
-        // Create boundary data
-        let fullBoundary = "--\(boundary)"
-        guard let boundaryData = fullBoundary.data(using: .utf8),
-              let doubleCRLF = "\r\n\r\n".data(using: .utf8) else {
+        // Find boundary data in different formats
+        guard let (boundaryData, boundaryString) = findWorkingBoundary(boundary, in: data) else {
+            print("❌ Failed to find working boundary in request data")
             return request
         }
         
-        // Split data by boundary
-        var currentPos = 0
+        print("📋 Using boundary: \"\(boundaryString)\"")
+        guard let doubleCRLF = "\r\n\r\n".data(using: .utf8) else { return request }
+        
+        // Find the first boundary
+        guard let firstBoundaryPos = findNextPosition(of: boundaryData, in: data, startingAt: 0) else {
+            print("❌ Could not find boundary in the data")
+            return request
+        }
+        
+        var currentPos = firstBoundaryPos
+        var partCount = 0
+        
+        // Process each part
         while currentPos < data.count {
-            // Find next boundary
-            guard let boundaryPos = findNextPosition(of: boundaryData, in: data, startingAt: currentPos),
-                  boundaryPos + boundaryData.count + 2 < data.count else {
-                break
+            guard let nextPart = processNextPart(
+                in: data, 
+                from: &currentPos, 
+                boundaryData: boundaryData, 
+                doubleCRLF: doubleCRLF
+            ) else {
+                break // No more parts or error
             }
             
-            // Move past boundary and CRLF
-            let partStart = boundaryPos + boundaryData.count + 2
-            
-            // Find headers end
-            guard let headersEnd = findNextPosition(of: doubleCRLF, in: data, startingAt: partStart) else {
-                currentPos = partStart
-                continue
-            }
-            
-            // Parse headers
-            let headersData = data.subdata(in: partStart..<headersEnd)
-            guard let headersString = String(data: headersData, encoding: .utf8) else {
-                currentPos = headersEnd + doubleCRLF.count
-                continue
-            }
-            
-            // Extract field name
-            let headers = parsePartHeaders(headersString)
-            guard let contentDisposition = headers["Content-Disposition"],
-                  let fieldName = extractFieldName(from: contentDisposition) else {
-                currentPos = headersEnd + doubleCRLF.count
-                continue
-            }
-            
-            // Look for next boundary to find content end
-            let contentStart = headersEnd + doubleCRLF.count
-            let nextBoundaryPos = findNextPosition(of: boundaryData, in: data, startingAt: contentStart) ?? data.count
-            
-            // Extract content (removing trailing CRLF if present)
-            let contentEnd = nextBoundaryPos >= 2 && data[nextBoundaryPos-2] == 0x0D && data[nextBoundaryPos-1] == 0x0A
-                ? nextBoundaryPos - 2 : nextBoundaryPos
-            
-            if contentStart < contentEnd {
-                let content = data.subdata(in: contentStart..<contentEnd)
+            if let fieldName = nextPart.fieldName, let content = nextPart.content {
+                print("📋 Found field: \(fieldName) with \(content.count) bytes")
                 processFieldContent(fieldName: fieldName, data: content, request: &request)
+                partCount += 1
             }
-            
-            currentPos = nextBoundaryPos
         }
+        
+        print("📋 Processed \(partCount) parts in multipart form data")
         
         return request
     }
     
-    /// Finds the next position of pattern in data
-    private func findNextPosition(of pattern: Data, in data: Data, startingAt: Int) -> Int? {
-        guard startingAt < data.count, !pattern.isEmpty, pattern.count <= data.count - startingAt else { 
-            return nil 
-        }
+    // Helper to extract boundary from content type
+    private func extractBoundary(from contentType: String) -> String? {
+        let boundaryPrefixes = ["boundary=", "boundary=\"", "boundary=\'"]
         
-        let endIndex = data.count - pattern.count + 1
-        for i in startingAt..<endIndex {
-            var matches = true
-            for j in 0..<pattern.count {
-                if data[i + j] != pattern[j] {
-                    matches = false
-                    break
+        for prefix in boundaryPrefixes {
+            if let range = contentType.range(of: prefix) {
+                let boundaryStart = range.upperBound
+                
+                // Handle quoted or unquoted boundaries
+                if prefix.hasSuffix("\"") || prefix.hasSuffix("\'") {
+                    let quoteChar = prefix.last!
+                    if let endRange = contentType[boundaryStart...].firstIndex(of: quoteChar) {
+                        return String(contentType[boundaryStart..<endRange])
+                    }
+                } else if let endRange = contentType[boundaryStart...].firstIndex(of: ";") {
+                    return String(contentType[boundaryStart..<endRange])
+                } else {
+                    return String(contentType[boundaryStart...])
                 }
             }
-            if matches {
-                return i
+        }
+        
+        return nil
+    }
+    
+    // Helper to find a working boundary format in the data
+    private func findWorkingBoundary(_ boundary: String, in data: Data) -> (Data, String)? {
+        let possibleBoundaries = ["--\(boundary)", boundary]
+        
+        for boundaryString in possibleBoundaries {
+            if let boundaryBytes = boundaryString.data(using: .utf8),
+               findNextPosition(of: boundaryBytes, in: data, startingAt: 0) != nil {
+                return (boundaryBytes, boundaryString)
             }
         }
+        
         return nil
+    }
+    
+    // Helper to process the next multipart part
+    private func processNextPart(
+        in data: Data,
+        from currentPos: inout Int,
+        boundaryData: Data,
+        doubleCRLF: Data
+    ) -> (fieldName: String?, content: Data?)? {
+        
+        // Find next boundary
+        guard let boundaryPos = findNextPosition(of: boundaryData, in: data, startingAt: currentPos) else {
+            return nil
+        }
+        
+        // Check if this is the final boundary
+        let isFinalBoundary = boundaryPos + boundaryData.count + 2 <= data.count &&
+                             data[boundaryPos + boundaryData.count] == 0x2D &&
+                             data[boundaryPos + boundaryData.count + 1] == 0x2D
+        
+        if isFinalBoundary {
+            return nil
+        }
+        
+        // Ensure we have enough data for CRLF
+        guard boundaryPos + boundaryData.count + 2 < data.count,
+              data[boundaryPos + boundaryData.count] == 0x0D,
+              data[boundaryPos + boundaryData.count + 1] == 0x0A else {
+            currentPos = boundaryPos + boundaryData.count
+            return nil
+        }
+        
+        let partStart = boundaryPos + boundaryData.count + 2
+        
+        // Find headers end
+        guard let headersEnd = findNextPosition(of: doubleCRLF, in: data, startingAt: partStart) else {
+            currentPos = partStart
+            return nil
+        }
+        
+        // Parse headers
+        guard let headersString = String(data: data.subdata(in: partStart..<headersEnd), encoding: .utf8) else {
+            currentPos = headersEnd + doubleCRLF.count
+            return nil
+        }
+        
+        // Extract field name
+        let headers = parsePartHeaders(headersString)
+        guard let contentDisposition = headers["Content-Disposition"],
+              let fieldName = extractFieldName(from: contentDisposition) else {
+            currentPos = headersEnd + doubleCRLF.count
+            return nil
+        }
+        
+        // Extract content
+        let contentStart = headersEnd + doubleCRLF.count
+        let nextBoundaryPos = findNextPosition(of: boundaryData, in: data, startingAt: contentStart) ?? data.count
+        
+        // Handle CRLF before boundary
+        let contentEnd = nextBoundaryPos >= 2 && data[nextBoundaryPos-2] == 0x0D && data[nextBoundaryPos-1] == 0x0A
+            ? nextBoundaryPos - 2 : nextBoundaryPos
+        
+        // Return the extracted content if valid
+        let content = contentStart < contentEnd ? data.subdata(in: contentStart..<contentEnd) : nil
+        currentPos = nextBoundaryPos
+        
+        return (fieldName, content)
     }
     
     /// Parses part headers into dictionary
@@ -717,5 +857,27 @@ final class SimpleHTTPServer {
                 connection.cancel()
             }
         })
+    }
+    
+    /// Finds the next position of pattern in data
+    private func findNextPosition(of pattern: Data, in data: Data, startingAt: Int) -> Int? {
+        guard startingAt < data.count, !pattern.isEmpty, pattern.count <= data.count - startingAt else { 
+            return nil 
+        }
+        
+        let endIndex = data.count - pattern.count + 1
+        for i in startingAt..<endIndex {
+            var matches = true
+            for j in 0..<pattern.count {
+                if data[i + j] != pattern[j] {
+                    matches = false
+                    break
+                }
+            }
+            if matches {
+                return i
+            }
+        }
+        return nil
     }
 } 
