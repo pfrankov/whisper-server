@@ -83,7 +83,7 @@ struct WhisperTranscriptionService {
             transcription += String(cString: whisper_full_get_segment_text(context, i))
         }
         
-        return transcription
+        return transcription.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
     /// Converts audio data to sample array for Whisper

@@ -49,9 +49,6 @@ final class SimpleHTTPServer {
     /// Queue for processing server operations
     private let serverQueue = DispatchQueue(label: "com.whisperserver.server", qos: .userInitiated)
     
-    /// Maximum request size (50 MB for large audio files)
-    private let maxRequestSize = 50 * 1024 * 1024
-    
     // MARK: - Initialization
     
     /// Creates a new instance of HTTP server
@@ -161,13 +158,6 @@ final class SimpleHTTPServer {
                     if !headersParsed, let headerEndIndex = receivedData.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A]))?.lowerBound {
                         headersParsed = true
                         expectedContentLength = self.extractContentLength(from: receivedData[0..<headerEndIndex])
-                    }
-                    
-                    // Check request size limit
-                    if receivedData.count > self.maxRequestSize {
-                        print("⚠️ Exceeded maximum request size (\(self.maxRequestSize / 1024 / 1024) MB)")
-                        self.sendErrorResponse(to: connection, message: "Request too large")
-                        return
                     }
                 }
                 
