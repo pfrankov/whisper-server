@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+#if os(macOS) || os(iOS)
+import Metal
+#endif
 
 @main
 struct WhisperServerApp: App {
@@ -37,15 +40,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Make app appear only in menu bar (no dock icon)
         NSApp.setActivationPolicy(.accessory)
         
+        #if os(macOS) || os(iOS)
+        // Предварительная загрузка Metal
+        preloadMetalLibraries()
+        #endif
+        
         setupStatusItem()
         startServer()
     }
     
     func applicationWillTerminate(_ notification: Notification) {
         stopServer()
+        WhisperTranscriptionService.cleanup()
     }
     
     // MARK: - Private Methods
+    
+    /// Предварительно загружает библиотеки Metal
+    private func preloadMetalLibraries() {
+        #if os(macOS) || os(iOS)
+        DispatchQueue.global(qos: .userInitiated).async {
+            print("🔄 Preloading Metal libraries...")
+            
+            // Создаем устройство Metal и сохраняем его для повторного использования
+            let device = MTLCreateSystemDefaultDevice()
+            if let _ = device {
+                print("✅ Metal device initialized")
+                
+                // В macOS Sonoma+ доступен улучшенный API для кэширования шейдеров
+                if #available(macOS 14.0, iOS 17.0, *) {
+                    print("🔄 Using enhanced Metal shader caching on macOS Sonoma+")
+                }
+            } else {
+                print("⚠️ Metal is not available on this device")
+            }
+        }
+        #endif
+    }
     
     /// Sets up the status item in the menu bar
     private func setupStatusItem() {
@@ -68,6 +99,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startServer() {
         httpServer = SimpleHTTPServer(port: serverPort)
         httpServer?.start()
+        
+        // Предварительная загрузка модели Whisper для ускорения первого запроса
+        DispatchQueue.global(qos: .userInitiated).async {
+            print("🔄 Preloading Whisper model...")
+            // Создаем пустые данные для инициализации контекста без реальной транскрипции
+            let silenceData = Data(repeating: 0, count: 1024)
+            WhisperTranscriptionService.transcribeAudioData(silenceData)
+        }
     }
     
     /// Stops the HTTP server

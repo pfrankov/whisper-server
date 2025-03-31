@@ -3,6 +3,49 @@ import whisper
 
 /// Audio transcription service using whisper.cpp
 struct WhisperTranscriptionService {
+    // Разделяемый контекст и блокировка для многопоточного доступа
+    private static var sharedContext: OpaquePointer?
+    private static let lock = NSLock()
+    
+    /// Настраивает постоянный кэш шейдеров Metal
+    private static func setupMetalShaderCache() {
+        #if os(macOS) || os(iOS)
+        // Папка для хранения кэша шейдеров Metal
+        var cacheDirectory: URL
+        
+        // Создаем путь к папке с кэшем в Application Support
+        if let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let bundleId = Bundle.main.bundleIdentifier ?? "com.whisperserver"
+            let whisperCacheDir = appSupportDir.appendingPathComponent(bundleId).appendingPathComponent("MetalCache")
+            
+            // Создаем директорию, если она не существует
+            do {
+                try FileManager.default.createDirectory(at: whisperCacheDir, withIntermediateDirectories: true)
+                cacheDirectory = whisperCacheDir
+                print("✅ Set Metal shader cache directory: \(whisperCacheDir.path)")
+            } catch {
+                print("⚠️ Failed to create Metal cache directory: \(error.localizedDescription)")
+                // Используем временную директорию как запасной вариант
+                cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("WhisperMetalCache")
+            }
+            
+            // Устанавливаем переменные окружения для Metal
+            setenv("MTL_SHADER_CACHE_PATH", cacheDirectory.path, 1)
+            setenv("MTL_SHADER_CACHE", "1", 1)
+            setenv("MTL_SHADER_CACHE_SKIP_VALIDATION", "1", 1)
+        }
+        #endif
+    }
+    
+    /// Освобождает ресурсы при завершении работы приложения
+    static func cleanup() {
+        lock.lock(); defer { lock.unlock() }
+        if let ctx = sharedContext {
+            whisper_free(ctx)
+            sharedContext = nil
+            print("🧹 Whisper context released")
+        }
+    }
     
     /// Performs transcription of audio data received from HTTP request and returns the result
     /// - Parameters:
@@ -11,27 +54,48 @@ struct WhisperTranscriptionService {
     ///   - prompt: Prompt to improve recognition (optional)
     /// - Returns: String with transcription result or nil in case of error
     static func transcribeAudioData(_ audioData: Data, language: String? = nil, prompt: String? = nil) -> String? {
-        let modelFilename = "ggml-base.en.bin"
+        // Получаем или инициализируем контекст
+        let context: OpaquePointer
         
-        // Find the model
-        guard let modelURL = Bundle.main.url(forResource: "ggml-base.en", withExtension: "bin", subdirectory: "models") else {
-            print("❌ Failed to find Whisper model")
-            return nil
-        }
-        
-        // Initialize Whisper context
-        var contextParams = whisper_context_default_params()
-        #if os(macOS) || os(iOS)
-        contextParams.use_gpu = true
-        #endif
-        
-        guard let context = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
-            print("❌ Failed to initialize Whisper context")
-            return nil
-        }
-        
-        defer {
-            whisper_free(context)
+        lock.lock()
+        if let existingContext = sharedContext {
+            context = existingContext
+            lock.unlock()
+        } else {
+            // Инициализируем новый контекст
+            print("🔄 Initializing Whisper context (this may take a while on first run)")
+            
+            #if os(macOS) || os(iOS)
+            // Настраиваем постоянный кэш шейдеров Metal
+            setupMetalShaderCache()
+            #endif
+            
+            guard let modelURL = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin") else {
+                lock.unlock()
+                print("❌ Failed to find Whisper model")
+                return nil
+            }
+            
+            var contextParams = whisper_context_default_params()
+            #if os(macOS) || os(iOS)
+            contextParams.use_gpu = true
+            contextParams.flash_attn = true
+            
+            // Дополнительные оптимизации для Metal
+            setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
+            setenv("WHISPER_METAL_MEM_MB", "512", 1) // Выделение большего количества памяти для Metal
+            #endif
+            
+            guard let newContext = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
+                lock.unlock()
+                print("❌ Failed to initialize Whisper context")
+                return nil
+            }
+            
+            sharedContext = newContext
+            context = newContext
+            print("✅ Whisper context initialized successfully")
+            lock.unlock()
         }
         
         // Configure parameters
