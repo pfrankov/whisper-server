@@ -40,13 +40,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Make app appear only in menu bar (no dock icon)
         NSApp.setActivationPolicy(.accessory)
         
-        #if os(macOS) || os(iOS)
-        // Предварительная загрузка Metal
-        preloadMetalLibraries()
-        #endif
-        
+        // Создаем статус бар
         setupStatusItem()
+        
+        #if os(macOS) || os(iOS)
+        // Предварительная загрузка Metal перед запуском сервера
+        preloadMetalShaders()
+        #else
         startServer()
+        #endif
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -56,26 +58,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     // MARK: - Private Methods
     
-    /// Предварительно загружает библиотеки Metal
-    private func preloadMetalLibraries() {
+    /// Предварительно загружает шейдеры Metal и запускает сервер после завершения
+    private func preloadMetalShaders() {
         #if os(macOS) || os(iOS)
-        DispatchQueue.global(qos: .userInitiated).async {
-            print("🔄 Preloading Metal libraries...")
+        // Обновляем статус в меню
+        updateStatusMenuItem(metalCaching: true)
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            print("🔄 Preloading Metal shaders...")
             
-            // Создаем устройство Metal и сохраняем его для повторного использования
+            // Проверка доступности Metal
             let device = MTLCreateSystemDefaultDevice()
-            if let _ = device {
-                print("✅ Metal device initialized")
-                
-                // В macOS Sonoma+ доступен улучшенный API для кэширования шейдеров
-                if #available(macOS 14.0, iOS 17.0, *) {
-                    print("🔄 Using enhanced Metal shader caching on macOS Sonoma+")
+            if device == nil {
+                print("⚠️ Metal is not available on this device, using CPU fallback")
+                DispatchQueue.main.async {
+                    self?.updateStatusMenuItem(metalCaching: false, failed: true)
+                    self?.startServer()
                 }
-            } else {
-                print("⚠️ Metal is not available on this device")
+                return
+            }
+            
+            print("✅ Metal device initialized")
+            
+            // Кэшируем шейдеры через инициализацию модели
+            print("🔄 Preloading Whisper model to cache Metal shaders...")
+            let success = WhisperTranscriptionService.preloadModelForShaderCaching()
+            
+            DispatchQueue.main.async {
+                if success {
+                    print("✅ Metal shaders cached successfully")
+                    self?.updateStatusMenuItem(metalCaching: false, failed: false)
+                } else {
+                    print("⚠️ Metal shader caching failed, using CPU fallback")
+                    self?.updateStatusMenuItem(metalCaching: false, failed: true)
+                }
+                // В любом случае запускаем сервер
+                self?.startServer()
             }
         }
         #endif
+    }
+    
+    /// Обновляет отображение статуса в меню
+    private func updateStatusMenuItem(metalCaching: Bool, failed: Bool = false) {
+        // Обновляем иконку в статус-баре
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: metalCaching ? "rays" : "waveform", 
+                                  accessibilityDescription: "WhisperServer")
+        }
+        
+        // Обновляем статус в меню
+        if let menu = statusItem.menu, menu.items.count > 0 {
+            let metalItem = menu.items[0]
+            
+            if metalCaching {
+                metalItem.title = "Metal: Caching shaders..."
+                metalItem.image = NSImage(systemSymbolName: "arrow.clockwise.circle", 
+                                        accessibilityDescription: nil)
+            } else if failed {
+                metalItem.title = "Metal: Using CPU fallback"
+                metalItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", 
+                                        accessibilityDescription: nil)
+            } else {
+                metalItem.title = "Metal: Ready (GPU acceleration)"
+                metalItem.image = NSImage(systemSymbolName: "checkmark.circle.fill", 
+                                        accessibilityDescription: nil)
+            }
+        }
     }
     
     /// Sets up the status item in the menu bar
@@ -84,11 +133,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Whisper Server")
-            button.toolTip = "WhisperServer running on port \(serverPort)"
+            button.toolTip = "WhisperServer - Initializing..."
         }
         
         let menu = NSMenu()
-        menu.addItem(withTitle: "Server running on port \(serverPort)", action: nil, keyEquivalent: "")
+        
+        // Статус Metal
+        let metalItem = NSMenuItem(title: "Metal: Initializing...", action: nil, keyEquivalent: "")
+        metalItem.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)
+        metalItem.toolTip = "GPU acceleration status - Loading shaders for faster transcription"
+        menu.addItem(metalItem)
+        
+        // Статус сервера
+        let serverItem = NSMenuItem(title: "Server: Waiting for initialization...", action: nil, keyEquivalent: "")
+        serverItem.toolTip = "HTTP server will start after initialization is complete"
+        menu.addItem(serverItem)
+        
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         
@@ -97,15 +157,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     /// Starts the HTTP server
     private func startServer() {
+        print("✅ Starting HTTP server on port \(serverPort)")
         httpServer = SimpleHTTPServer(port: serverPort)
+        
+        // Обновляем статус на "запускается" сразу
+        if let menu = statusItem.menu, menu.items.count > 1 {
+            let serverItem = menu.items[1]
+            serverItem.title = "Server: Starting on port \(serverPort)..."
+            serverItem.image = NSImage(systemSymbolName: "network", accessibilityDescription: nil)
+        }
+        
+        // Запускаем сервер
         httpServer?.start()
         
-        // Предварительная загрузка модели Whisper для ускорения первого запроса
-        DispatchQueue.global(qos: .userInitiated).async {
-            print("🔄 Preloading Whisper model...")
-            // Создаем пустые данные для инициализации контекста без реальной транскрипции
-            let silenceData = Data(repeating: 0, count: 1024)
-            WhisperTranscriptionService.transcribeAudioData(silenceData)
+        // Проверим статус после небольшой задержки
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, let httpServer = self.httpServer else { return }
+            
+            if let menu = self.statusItem.menu, menu.items.count > 1 {
+                let serverItem = menu.items[1]
+                
+                if httpServer.isRunning {
+                    serverItem.title = "Server: Running on port \(self.serverPort)"
+                    serverItem.image = NSImage(systemSymbolName: "network", accessibilityDescription: nil)
+                    
+                    // Обновляем tooltip в статус-баре
+                    if let button = self.statusItem.button {
+                        button.toolTip = "WhisperServer running on port \(self.serverPort)"
+                    }
+                } else {
+                    serverItem.title = "Server: Failed to start"
+                    serverItem.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
+                }
+            }
         }
     }
     

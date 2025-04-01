@@ -1,5 +1,8 @@
 import Foundation
 import whisper
+#if os(macOS) || os(iOS)
+import SwiftUI
+#endif
 
 /// Audio transcription service using whisper.cpp
 struct WhisperTranscriptionService {
@@ -23,6 +26,13 @@ struct WhisperTranscriptionService {
                 try FileManager.default.createDirectory(at: whisperCacheDir, withIntermediateDirectories: true)
                 cacheDirectory = whisperCacheDir
                 print("✅ Set Metal shader cache directory: \(whisperCacheDir.path)")
+                
+                // Проверяем существует ли уже кэш
+                let fileManager = FileManager.default
+                let cacheFolderContents = try? fileManager.contentsOfDirectory(at: whisperCacheDir, includingPropertiesForKeys: nil)
+                if let contents = cacheFolderContents, !contents.isEmpty {
+                    print("📋 Found existing Metal cache with \(contents.count) files")
+                }
             } catch {
                 print("⚠️ Failed to create Metal cache directory: \(error.localizedDescription)")
                 // Используем временную директорию как запасной вариант
@@ -33,6 +43,11 @@ struct WhisperTranscriptionService {
             setenv("MTL_SHADER_CACHE_PATH", cacheDirectory.path, 1)
             setenv("MTL_SHADER_CACHE", "1", 1)
             setenv("MTL_SHADER_CACHE_SKIP_VALIDATION", "1", 1)
+            
+            // Дополнительные настройки для отладки кэширования
+            #if DEBUG
+            setenv("MTL_DEBUG_SHADER_CACHE", "1", 1)
+            #endif
         }
         #endif
     }
@@ -45,6 +60,48 @@ struct WhisperTranscriptionService {
             sharedContext = nil
             print("🧹 Whisper context released")
         }
+    }
+    
+    /// Выполняет проверку и инициализацию контекста без проведения транскрипции
+    /// - Returns: True если инициализация успешно завершена
+    static func preloadModelForShaderCaching() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        
+        // Если контекст уже существует, просто возвращаем успех
+        if sharedContext != nil {
+            return true
+        }
+        
+        print("🔄 Preloading Whisper model for shader caching")
+        
+        #if os(macOS) || os(iOS)
+        // Настраиваем постоянный кэш шейдеров Metal
+        setupMetalShaderCache()
+        #endif
+        
+        guard let modelURL = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin") else {
+            print("❌ Failed to find Whisper model")
+            return false
+        }
+        
+        var contextParams = whisper_context_default_params()
+        #if os(macOS) || os(iOS)
+        contextParams.use_gpu = true
+        contextParams.flash_attn = true
+        
+        // Дополнительные оптимизации для Metal
+        setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
+        setenv("WHISPER_METAL_MEM_MB", "512", 1) // Выделение большего количества памяти для Metal
+        #endif
+        
+        guard let newContext = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
+            print("❌ Failed to initialize Whisper context")
+            return false
+        }
+        
+        sharedContext = newContext
+        print("✅ Whisper context initialized successfully")
+        return true
     }
     
     /// Performs transcription of audio data received from HTTP request and returns the result
