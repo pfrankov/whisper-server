@@ -79,7 +79,7 @@ struct WhisperTranscriptionService {
         setupMetalShaderCache()
         #endif
         
-        guard let modelURL = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin") else {
+        guard let modelURL = Bundle.main.url(forResource: "ggml-large-v3-turbo-q5_0", withExtension: "bin") else {
             print("❌ Failed to find Whisper model")
             return false
         }
