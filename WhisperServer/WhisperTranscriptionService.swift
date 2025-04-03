@@ -76,14 +76,14 @@ struct WhisperTranscriptionService {
             }
             
             // Read the entire file into a buffer
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else {
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else {
                 print("❌ Failed to create source PCM buffer")
                 return nil
             }
             
             do {
                 try file.read(into: buffer)
-            } catch {
+                } catch {
                 print("❌ Failed to read audio file: \(error.localizedDescription)")
                 return nil
             }
@@ -92,7 +92,7 @@ struct WhisperTranscriptionService {
             if abs(sourceFormat.sampleRate - outputFormat.sampleRate) < 1.0 && 
                sourceFormat.channelCount == outputFormat.channelCount {
                 return extractSamplesFromBuffer(buffer)
-            }
+        }
             
             // Create converter and convert
             guard let converter = AVAudioConverter(from: sourceFormat, to: outputFormat) else {
@@ -232,7 +232,7 @@ struct WhisperTranscriptionService {
         
         // Дополнительные оптимизации для Metal
         setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
-        setenv("WHISPER_METAL_MEM_MB", "512", 1) // Выделение большего количества памяти для Metal
+        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Выделение большего количества памяти для Metal
         #endif
         
         guard let newContext = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
@@ -282,7 +282,7 @@ struct WhisperTranscriptionService {
             
             // Дополнительные оптимизации для Metal
             setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
-            setenv("WHISPER_METAL_MEM_MB", "512", 1) // Выделение большего количества памяти для Metal
+            setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Выделение большего количества памяти для Metal
             #endif
             
             guard let newContext = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
@@ -305,7 +305,6 @@ struct WhisperTranscriptionService {
         params.print_special = false
         params.translate = false
         params.no_context = true
-        params.single_segment = false
         
         // Set language if specified
         if let language = language {
