@@ -126,6 +126,7 @@ struct WhisperTranscriptionService {
             // Настраиваем постоянный кэш шейдеров Metal
             setupMetalShaderCache()
             #endif
+        
             
             guard let modelURL = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin") else {
                 lock.unlock()
