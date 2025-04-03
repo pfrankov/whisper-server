@@ -1,5 +1,7 @@
 # WhisperServer
 
+<img src="https://github.com/user-attachments/assets/bf882d55-f1f6-4765-9124-e2cb351eabe0" alt="Demo" width="500"/>
+
 WhisperServer is a macOS application that runs in the background with only a menu bar icon. It provides an HTTP server compatible with the OpenAI Whisper API for audio transcription.
 
 ## Key Features
