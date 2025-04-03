@@ -2,10 +2,151 @@ import Foundation
 import whisper
 #if os(macOS) || os(iOS)
 import SwiftUI
+import AVFoundation
 #endif
 
 /// Audio transcription service using whisper.cpp
 struct WhisperTranscriptionService {
+    // MARK: - Audio Conversion
+    
+    /// Handles conversion of various audio formats to 16-bit, 16kHz mono WAV required by Whisper
+    class AudioConverter {
+        /// Converts audio data from any supported format to the format required by Whisper
+        /// - Parameter audioData: Original audio data in any format (mp3, m4a, ogg, wav, etc.)
+        /// - Returns: Converted audio data as PCM 16-bit 16kHz mono samples, or nil if conversion failed
+        static func convertToWhisperFormat(_ audioData: Data) -> [Float]? {
+            #if os(macOS) || os(iOS)
+            return convertUsingAVFoundation(audioData)
+            #else
+            print("❌ Audio conversion is only supported on macOS and iOS")
+            return nil
+            #endif
+        }
+        
+        #if os(macOS) || os(iOS)
+        /// Converts audio using AVFoundation framework - unified approach for all formats
+        private static func convertUsingAVFoundation(_ audioData: Data) -> [Float]? {
+            print("🔄 Converting audio to Whisper format (16kHz mono float)")
+            
+            // Target format: 16kHz mono float
+            let targetSampleRate = 16000.0
+            let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                           sampleRate: targetSampleRate,
+                                           channels: 1,
+                                           interleaved: false)!
+            
+            // Create a temporary file for the input audio
+            let tempInputURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString + ".audio")
+            
+            do {
+                // Write input data to temporary file
+                try audioData.write(to: tempInputURL)
+                
+                defer {
+                    // Clean up temporary file
+                    try? FileManager.default.removeItem(at: tempInputURL)
+                }
+                
+                // Try to create an AVAudioFile from the data
+                guard let audioFile = try? AVAudioFile(forReading: tempInputURL) else {
+                    print("❌ Failed to create AVAudioFile for reading")
+                    return nil
+                }
+                
+                let sourceFormat = audioFile.processingFormat
+                print("🔍 Source format: \(sourceFormat.sampleRate)Hz, \(sourceFormat.channelCount) channels")
+                
+                // Convert the audio file to the required format
+                return convertAudioFile(audioFile, toFormat: outputFormat)
+            } catch {
+                print("❌ Failed during audio file preparation: \(error.localizedDescription)")
+                return nil
+            }
+        }
+        
+        /// Converts an audio file to the specified format
+        private static func convertAudioFile(_ file: AVAudioFile, toFormat outputFormat: AVAudioFormat) -> [Float]? {
+            let sourceFormat = file.processingFormat
+            let frameCount = AVAudioFrameCount(file.length)
+            
+            // If the file is empty, return nil
+            if frameCount == 0 {
+                print("❌ Audio file is empty")
+                return nil
+            }
+            
+            // Read the entire file into a buffer
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else {
+                print("❌ Failed to create source PCM buffer")
+                return nil
+            }
+            
+            do {
+                try file.read(into: buffer)
+            } catch {
+                print("❌ Failed to read audio file: \(error.localizedDescription)")
+                return nil
+            }
+            
+            // If source format matches target format, just return the samples
+            if abs(sourceFormat.sampleRate - outputFormat.sampleRate) < 1.0 && 
+               sourceFormat.channelCount == outputFormat.channelCount {
+                return extractSamplesFromBuffer(buffer)
+            }
+            
+            // Create converter and convert
+            guard let converter = AVAudioConverter(from: sourceFormat, to: outputFormat) else {
+                print("❌ Failed to create audio converter")
+                return nil
+            }
+            
+            // Calculate output buffer size with some margin
+            let ratio = outputFormat.sampleRate / sourceFormat.sampleRate
+            let outputFrameCapacity = AVAudioFrameCount(Double(frameCount) * ratio * 1.1)
+            
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputFrameCapacity) else {
+                print("❌ Failed to create output buffer")
+                return nil
+            }
+            
+            // Perform conversion
+            var error: NSError?
+            let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            
+            let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+            
+            if status == .error || error != nil {
+                print("❌ Conversion failed: \(error?.localizedDescription ?? "unknown error")")
+                return nil
+            }
+            
+            if outputBuffer.frameLength == 0 {
+                print("❌ No frames were converted")
+                return nil
+            }
+            
+            print("✅ Successfully converted to \(outputBuffer.frameLength) frames at \(outputFormat.sampleRate)Hz")
+            
+            return extractSamplesFromBuffer(outputBuffer)
+        }
+        
+        /// Extracts float samples from an audio buffer
+        private static func extractSamplesFromBuffer(_ buffer: AVAudioPCMBuffer) -> [Float]? {
+            guard let channelData = buffer.floatChannelData, buffer.frameLength > 0 else {
+                print("❌ No valid channel data in buffer")
+                return nil
+            }
+            
+            // Extract samples from the first channel (mono)
+            let data = UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength))
+            return Array(data)
+        }
+        #endif
+    }
+
     // Разделяемый контекст и блокировка для многопоточного доступа
     private static var sharedContext: OpaquePointer?
     private static let lock = NSLock()
@@ -183,8 +324,11 @@ struct WhisperTranscriptionService {
         // Use available CPU cores efficiently
         params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
         
-        // Convert audio to samples for Whisper
-        let samples = convertAudioToSamples(audioData)
+        // Convert audio to samples for Whisper using the new converter
+        guard let samples = AudioConverter.convertToWhisperFormat(audioData) else {
+            print("❌ Failed to convert audio data to Whisper format")
+            return nil
+        }
         
         // Start transcription
         var result: Int32 = -1
@@ -206,136 +350,5 @@ struct WhisperTranscriptionService {
         }
         
         return transcription.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    
-    /// Converts audio data to sample array for Whisper
-    private static func convertAudioToSamples(_ audioData: Data) -> [Float] {
-        // Perform detailed analysis of the audio format
-        print("🔍 Analyzing audio data of size \(audioData.count) bytes")
-        
-        // Check WAV header (RIFF)
-        let isWav = audioData.count > 12 && 
-                    audioData[0] == 0x52 && // R
-                    audioData[1] == 0x49 && // I
-                    audioData[2] == 0x46 && // F
-                    audioData[3] == 0x46    // F
-        
-        // Check MP3 header
-        let isMp3 = audioData.count > 3 && 
-                    (audioData[0] == 0x49 && audioData[1] == 0x44 && audioData[2] == 0x33) || // ID3
-                    (audioData[0] == 0xFF && audioData[1] == 0xFB) // MP3 sync
-        
-        // Debug first few bytes
-        let previewLength = min(16, audioData.count)
-        let bytesPreview = audioData.prefix(previewLength).map { String(format: "%02X", $0) }.joined(separator: " ")
-        print("🔍 First \(previewLength) bytes: \(bytesPreview)")
-        
-        if isWav {
-            print("✅ Processing WAV format audio")
-            let samples = convertWavDataToSamples(audioData)
-            print("✅ Converted WAV data to \(samples.count) samples")
-            if samples.isEmpty {
-                print("⚠️ WAV conversion resulted in 0 samples, attempting raw PCM conversion")
-                return convertRawPCMToSamples(audioData)
-            }
-            return samples
-        } else if isMp3 {
-            print("⚠️ MP3 format detected but not directly supported. Converting as raw PCM")
-            let samples = convertRawPCMToSamples(audioData)
-            print("✅ Converted MP3 data to \(samples.count) samples using raw PCM approach")
-            return samples
-        } else {
-            print("⚠️ Unknown audio format, attempting to interpret as raw PCM")
-            let samples = convertRawPCMToSamples(audioData)
-            print("✅ Converted unknown format to \(samples.count) samples using raw PCM approach")
-            return samples
-        }
-    }
-    
-    /// Converts WAV data to sample array
-    private static func convertWavDataToSamples(_ audioData: Data) -> [Float] {
-        return audioData.withUnsafeBytes { rawBufferPointer -> [Float] in
-            let headerSize = findWavDataChunk(audioData)
-            let bytesPerSample = 2 // 16-bit PCM
-            
-            print("🔍 WAV header size detected as \(headerSize) bytes")
-            
-            guard headerSize > 0 && audioData.count > headerSize + bytesPerSample else {
-                print("❌ WAV file invalid or too short: header=\(headerSize), total size=\(audioData.count)")
-                return []
-            }
-            
-            guard let baseAddress = rawBufferPointer.baseAddress else {
-                return []
-            }
-            
-            let dataPtr = baseAddress.advanced(by: headerSize)
-            let int16Ptr = dataPtr.assumingMemoryBound(to: Int16.self)
-            
-            let numSamples = (audioData.count - headerSize) / bytesPerSample
-            print("🔍 Creating \(numSamples) samples from WAV data")
-            
-            var samples = [Float](repeating: 0, count: numSamples)
-            
-            for i in 0..<numSamples {
-                samples[i] = Float(int16Ptr[i]) / 32768.0
-            }
-            
-            return samples
-        }
-    }
-    
-    /// Finds the actual start of audio data in a WAV file by looking for the 'data' chunk
-    private static func findWavDataChunk(_ audioData: Data) -> Int {
-        // Standard WAV header is 44 bytes, but we'll search for the 'data' chunk to be sure
-        guard audioData.count >= 44 else { return 0 }
-        
-        // Try the standard position first (most common case)
-        if audioData.count >= 44 + 4 &&
-           audioData[36] == 0x64 && // d
-           audioData[37] == 0x61 && // a
-           audioData[38] == 0x74 && // t
-           audioData[39] == 0x61 {  // a
-            // Get the data chunk size (4 bytes after 'data')
-            let chunkSizeBytes = [audioData[40], audioData[41], audioData[42], audioData[43]]
-            let chunkSize = UInt32(chunkSizeBytes[0]) | (UInt32(chunkSizeBytes[1]) << 8) | 
-                           (UInt32(chunkSizeBytes[2]) << 16) | (UInt32(chunkSizeBytes[3]) << 24)
-            print("🔍 Found standard WAV header with data chunk size: \(chunkSize) bytes")
-            return 44
-        }
-        
-        // Search for the 'data' chunk in the file
-        for i in 12..<(audioData.count - 8) {
-            if audioData[i] == 0x64 && // d
-               audioData[i+1] == 0x61 && // a
-               audioData[i+2] == 0x74 && // t
-               audioData[i+3] == 0x61 {  // a
-                let headerSize = i + 8 // Skip 'data' + 4 bytes of chunk size
-                print("🔍 Found WAV data chunk at offset \(i), header size: \(headerSize)")
-                return headerSize
-            }
-        }
-        
-        print("⚠️ Could not find 'data' chunk in WAV file, using standard 44-byte header")
-        return 44 // Default to standard WAV header if we can't find the data chunk
-    }
-    
-    /// Interprets audio data as raw PCM
-    private static func convertRawPCMToSamples(_ audioData: Data) -> [Float] {
-        return audioData.withUnsafeBytes { rawBufferPointer -> [Float] in
-            let bytesPerSample = 2 // Assume 16-bit PCM
-            let numSamples = audioData.count / bytesPerSample
-            var samples = [Float](repeating: 0, count: numSamples)
-            
-            if let baseAddress = rawBufferPointer.baseAddress {
-                let int16Ptr = baseAddress.assumingMemoryBound(to: Int16.self)
-                
-                for i in 0..<numSamples {
-                    samples[i] = Float(int16Ptr[i]) / 32768.0
-                }
-            }
-            
-            return samples
-        }
     }
 }
