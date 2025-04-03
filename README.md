@@ -8,15 +8,15 @@ WhisperServer is a macOS application that runs in the background with only a men
 - Displays a menu bar icon with status information
 - Provides an API compatible with the OpenAI Whisper API
 - Supports the `/v1/audio/transcriptions` endpoint for audio transcription
-- HTTP server on port 8888
+- HTTP server on port 12017
 - Also returns "OK" in response to any other HTTP request
 
 ## How to Use
 
 1. Build and run the application in Xcode
 2. Look for the server icon in the menu bar
-3. The HTTP server will automatically start on port 8888
-4. Use the API endpoint for transcription: `http://localhost:8888/v1/audio/transcriptions`
+3. The HTTP server will automatically start on port 12017
+4. Use the API endpoint for transcription: `http://localhost:12017/v1/audio/transcriptions`
 5. To exit the application, click on the menu bar icon and select "Quit"
 
 ## Example of Using the Whisper API
@@ -24,15 +24,13 @@ WhisperServer is a macOS application that runs in the background with only a men
 For audio transcription:
 
 ```bash
-curl -X POST http://localhost:8888/v1/audio/transcriptions \
+curl -X POST http://localhost:12017/v1/audio/transcriptions \
   -F file=@/path/to/audio.mp3 \
-  -F model=whisper-1 \
   -F response_format=json
 ```
 
 Supported parameters:
 - `file` - audio file (required)
-- `model` - model identifier (only "whisper-1" is supported)
 - `prompt` - text to guide the transcription style
 - `response_format` - response format (json, text, srt, vtt, verbose_json)
 - `temperature` - sampling temperature from 0 to 1
@@ -83,7 +81,7 @@ The server supports the following response formats:
 ## Technical Details
 
 - The application uses the modern Network framework to create an HTTP server
-- The default port value is 8888
+- The default port value is 12017
 - No window is displayed — the application works completely in the background
 - Optimized code architecture for easy maintenance
 
@@ -106,8 +104,8 @@ The project is divided into the following main components:
 If you have problems connecting to the server:
 
 1. Make sure the application is running (icon in the menu bar)
-2. Check if the firewall is blocking port 8888
-3. Check if there are other applications using port 8888
+2. Check if the firewall is blocking port 12017
+3. Check if there are other applications using port 12017
 4. If the server is not responding, restart the application
 
 For detailed logs, run the application from Xcode and watch the console. 

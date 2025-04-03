@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var httpServer: SimpleHTTPServer?
     
     /// The port the server listens on
-    private let serverPort: UInt16 = 8888
+    private let serverPort: UInt16 = 12017
     
     // MARK: - Application Lifecycle
     
