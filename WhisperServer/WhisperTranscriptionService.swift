@@ -203,13 +203,30 @@ struct WhisperTranscriptionService {
         }
     }
     
+    /// Принудительно освобождает и переинициализирует контекст Whisper при смене модели
+    static func reinitializeContext() {
+        // Освобождаем текущий контекст, если он существует
+        lock.lock()
+        if let ctx = sharedContext {
+            whisper_free(ctx)
+            sharedContext = nil
+            print("🔄 Whisper context released for model change")
+        }
+        lock.unlock()
+        
+        // Контекст будет переинициализирован при следующем вызове transcribeAudioData
+        // или preloadModelForShaderCaching автоматически
+        print("✅ Context will be reinitialized on next use with new model")
+    }
+    
     /// Выполняет проверку и инициализацию контекста без проведения транскрипции
     /// - Returns: True если инициализация успешно завершена
-    static func preloadModelForShaderCaching() -> Bool {
+    static func preloadModelForShaderCaching(modelBinPath: URL? = nil, modelEncoderDir: URL? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
         
         // Если контекст уже существует, просто возвращаем успех
         if sharedContext != nil {
+            print("✅ Context already initialized, reusing")
             return true
         }
         
@@ -220,8 +237,78 @@ struct WhisperTranscriptionService {
         setupMetalShaderCache()
         #endif
         
-        guard let modelURL = Bundle.main.url(forResource: "ggml-large-v3-turbo-q5_0", withExtension: "bin") else {
-            print("❌ Failed to find Whisper model")
+        // Get model paths either from parameters or try to get from AppDelegate
+        var binPath: URL?
+        
+        if let providedBinPath = modelBinPath {
+            // Use directly provided path 
+            binPath = providedBinPath
+        } else {
+            // Fallback to getting from AppDelegate - but now this won't be called from background thread
+            print("🔄 Attempting to get paths from ModelManager via AppDelegate...")
+            DispatchQueue.main.sync {
+                if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
+                    if let modelPaths = appDelegate.modelManager.getPathsForSelectedModel() {
+                        binPath = modelPaths.binPath
+                    }
+                }
+            }
+        }
+        
+        guard let binPath = binPath else {
+            print("❌ Failed to get model bin path")
+            return false
+        }
+        
+        print("📂 Using model file at: \(binPath.path)")
+        
+        // Verify file exists and can be accessed
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: binPath.path) {
+            print("❌ Model file doesn't exist at: \(binPath.path)")
+            return false
+        }
+        
+        if !fileManager.isReadableFile(atPath: binPath.path) {
+            print("❌ Model file isn't readable at: \(binPath.path)")
+            return false
+        }
+        
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: binPath.path, isDirectory: &isDirectory) && isDirectory.boolValue {
+            print("❌ Path exists but is a directory, not a file: \(binPath.path)")
+            return false
+        }
+        
+        // Log file size for debugging
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: binPath.path)
+            if let fileSize = attributes[.size] as? UInt64 {
+                print("📄 File size: \(fileSize) bytes")
+                if fileSize < 1000000 { // At least 1MB for a model file
+                    print("⚠️ Warning: Model file is suspiciously small")
+                }
+            } else {
+                print("📄 File size: unknown")
+            }
+        } catch {
+            print("📄 File size: could not be determined - \(error.localizedDescription)")
+        }
+        
+        // Additional verification: try to read a bit of the file
+        do {
+            let fileHandle = try FileHandle(forReadingFrom: binPath)
+            let header = try fileHandle.read(upToCount: 16)
+            try fileHandle.close()
+            
+            if header == nil || header!.isEmpty {
+                print("❌ Could not read file header - file may be empty or inaccessible")
+                return false
+            }
+            
+            print("✅ Successfully read file header")
+        } catch {
+            print("❌ Error reading file: \(error.localizedDescription)")
             return false
         }
         
@@ -233,16 +320,73 @@ struct WhisperTranscriptionService {
         // Дополнительные оптимизации для Metal
         setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
         setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Выделение большего количества памяти для Metal
+        print("🔧 Metal settings: NDIM=128, MEM_MB=1024")
         #endif
         
-        guard let newContext = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
-            print("❌ Failed to initialize Whisper context")
+        print("🔄 Initializing Whisper context with file...")
+        let contextResult = whisper_init_from_file_with_params(binPath.path, contextParams)
+        
+        if contextResult == nil {
+            print("❌ Failed to initialize Whisper context - null result returned")
             return false
         }
         
-        sharedContext = newContext
+        sharedContext = contextResult
         print("✅ Whisper context initialized successfully")
         return true
+    }
+    
+    /// Инициализирует контекст Whisper с явно переданными путями к модели
+    private static func initializeContext(binPath: URL) -> OpaquePointer? {
+        print("🔄 Initializing Whisper context with provided model path")
+        
+        #if os(macOS) || os(iOS)
+        // Настраиваем постоянный кэш шейдеров Metal
+        setupMetalShaderCache()
+        #endif
+        
+        print("📂 Using model file at: \(binPath.path)")
+        
+        // Verify file exists and can be accessed
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: binPath.path),
+              fileManager.isReadableFile(atPath: binPath.path) else {
+            print("❌ Model file doesn't exist or isn't readable at: \(binPath.path)")
+            return nil
+        }
+        
+        // Log file size for debugging
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: binPath.path)
+            if let fileSize = attributes[.size] as? UInt64 {
+                print("📄 File size: \(fileSize) bytes")
+            } else {
+                print("📄 File size: unknown")
+            }
+        } catch {
+            print("📄 File size: could not be determined - \(error.localizedDescription)")
+        }
+        
+        var contextParams = whisper_context_default_params()
+        
+        #if os(macOS) || os(iOS)
+        contextParams.use_gpu = true
+        contextParams.flash_attn = true
+        
+        // Дополнительные оптимизации для Metal
+        setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
+        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Выделение большего количества памяти для Metal
+        print("🔧 Metal settings: NDIM=128, MEM_MB=1024")
+        #endif
+        
+        print("🔄 Initializing Whisper context with file...")
+        guard let newContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
+            print("❌ Failed to initialize Whisper context")
+            return nil
+        }
+        
+        print("✅ Whisper context initialized successfully")
+        return newContext
     }
     
     /// Performs transcription of audio data received from HTTP request and returns the result
@@ -250,51 +394,60 @@ struct WhisperTranscriptionService {
     ///   - audioData: Binary audio file data
     ///   - language: Audio language code (optional, by default determined automatically)
     ///   - prompt: Prompt to improve recognition (optional)
+    ///   - modelPaths: Optional model paths to use for initialization if context doesn't exist
     /// - Returns: String with transcription result or nil in case of error
-    static func transcribeAudioData(_ audioData: Data, language: String? = nil, prompt: String? = nil) -> String? {
+    static func transcribeAudioData(_ audioData: Data, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> String? {
         // Получаем или инициализируем контекст
         let context: OpaquePointer
         
         lock.lock()
+        
+        // Check if we have an existing context
         if let existingContext = sharedContext {
+            print("✅ Using existing Whisper context")
             context = existingContext
             lock.unlock()
         } else {
-            // Инициализируем новый контекст
+            // We need to initialize a new context
             print("🔄 Initializing Whisper context (this may take a while on first run)")
             
-            #if os(macOS) || os(iOS)
-            // Настраиваем постоянный кэш шейдеров Metal
-            setupMetalShaderCache()
-            #endif
-        
-            
-            guard let modelURL = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin") else {
+            // Determine how to get model paths - either use the provided paths or fail
+            if let paths = modelPaths {
+                print("🔄 Using provided model paths for initialization:")
+                print("   - Bin path: \(paths.binPath.path)")
+                print("   - Encoder dir: \(paths.encoderDir.path)")
+                
+                // Verify that the files exist and are readable
+                let fileManager = FileManager.default
+                if !fileManager.fileExists(atPath: paths.binPath.path) {
+                    lock.unlock()
+                    print("❌ Model bin file does not exist at path: \(paths.binPath.path)")
+                    return nil
+                }
+                
+                if !fileManager.isReadableFile(atPath: paths.binPath.path) {
+                    lock.unlock()
+                    print("❌ Model bin file is not readable at path: \(paths.binPath.path)")
+                    return nil
+                }
+                
+                // Initialize context with the provided bin path
+                guard let newContext = initializeContext(binPath: paths.binPath) else {
+                    lock.unlock()
+                    print("❌ Failed to initialize Whisper context with provided paths")
+                    return nil
+                }
+                
+                sharedContext = newContext
+                context = newContext
+                print("✅ Successfully initialized new Whisper context with provided model paths")
                 lock.unlock()
-                print("❌ Failed to find Whisper model")
+            } else {
+                // We don't have model paths and we're in a background thread - cannot proceed
+                lock.unlock()
+                print("❌ No model paths provided and cannot access AppDelegate from background thread")
                 return nil
             }
-            
-            var contextParams = whisper_context_default_params()
-            #if os(macOS) || os(iOS)
-            contextParams.use_gpu = true
-            contextParams.flash_attn = true
-            
-            // Дополнительные оптимизации для Metal
-            setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
-            setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Выделение большего количества памяти для Metal
-            #endif
-            
-            guard let newContext = whisper_init_from_file_with_params(modelURL.path, contextParams) else {
-                lock.unlock()
-                print("❌ Failed to initialize Whisper context")
-                return nil
-            }
-            
-            sharedContext = newContext
-            context = newContext
-            print("✅ Whisper context initialized successfully")
-            lock.unlock()
         }
         
         // Configure parameters

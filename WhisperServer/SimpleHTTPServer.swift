@@ -7,6 +7,9 @@
 
 import Foundation
 import Network
+#if os(macOS)
+import AppKit
+#endif
 
 /// HTTP server for processing Whisper API requests
 final class SimpleHTTPServer {
@@ -48,6 +51,10 @@ final class SimpleHTTPServer {
     
     /// Queue for processing server operations
     private let serverQueue = DispatchQueue(label: "com.whisperserver.server", qos: .userInitiated)
+    
+    // UserDefaults keys for stored model paths
+    private let binPathKey = "CurrentModelBinPath"
+    private let encoderDirKey = "CurrentModelEncoderDir"
     
     // MARK: - Initialization
     
@@ -344,6 +351,42 @@ final class SimpleHTTPServer {
         
         print("✅ Successfully extracted audio data of size \(whisperRequest.audioData?.count ?? 0) bytes")
         
+        // Get model paths - first try from AppDelegate, then fallback to direct lookup
+        var modelPaths: (binPath: URL, encoderDir: URL)?
+        var pathError: String? = nil
+        
+        // First try to get paths on the main thread through AppDelegate
+        DispatchQueue.main.sync {
+            #if os(macOS)
+            if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
+                modelPaths = appDelegate.modelManager.getModelPaths()
+            }
+            #endif
+        }
+        
+        // If we couldn't get paths via AppDelegate, try the direct lookup
+        if modelPaths == nil {
+            modelPaths = findModelPaths()
+            
+            if modelPaths != nil {
+                print("✅ Found model files directly")
+            } else {
+                pathError = "Could not locate valid model files"
+            }
+        }
+        
+        // If we still don't have paths, fail with an error
+        if modelPaths == nil {
+            DispatchQueue.main.async {
+                print("❌ Failed to perform transcription: \(pathError ?? "No model files found")")
+                self.sendErrorResponse(
+                    to: connection,
+                    message: "Transcription error: \(pathError ?? "No model files found")"
+                )
+            }
+            return
+        }
+        
         // Perform transcription in background
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -353,7 +396,8 @@ final class SimpleHTTPServer {
             let transcription = WhisperTranscriptionService.transcribeAudioData(
                 whisperRequest.audioData!,
                 language: whisperRequest.language,
-                prompt: whisperRequest.prompt
+                prompt: whisperRequest.prompt,
+                modelPaths: modelPaths
             )
             
             // Check if connection is still active
@@ -378,6 +422,95 @@ final class SimpleHTTPServer {
                 }
             }
         }
+    }
+    
+    /// Finds model paths either from stored values or direct file search
+    private func findModelPaths() -> (binPath: URL, encoderDir: URL)? {
+        // First check UserDefaults for stored model paths
+        if let paths = getPathsFromUserDefaults() {
+            return paths
+        }
+        
+        // Try to find model files directly
+        return findModelFilesInAppSupport()
+    }
+    
+    /// Attempts to retrieve paths from UserDefaults
+    private func getPathsFromUserDefaults() -> (binPath: URL, encoderDir: URL)? {
+        guard let storedBinPath = UserDefaults.standard.string(forKey: binPathKey),
+              let storedEncoderDir = UserDefaults.standard.string(forKey: encoderDirKey) else {
+            return nil
+        }
+        
+        let binURL = URL(fileURLWithPath: storedBinPath)
+        let encoderURL = URL(fileURLWithPath: storedEncoderDir)
+        
+        // Verify the files exist
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: binURL.path) && fileManager.fileExists(atPath: encoderURL.path) {
+            return (binURL, encoderURL)
+        }
+        
+        return nil
+    }
+    
+    /// Searches for model files in the Application Support directory
+    private func findModelFilesInAppSupport() -> (binPath: URL, encoderDir: URL)? {
+        let fileManager = FileManager.default
+        
+        // Get application support directory
+        guard let appSupportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        
+        // Bundle identifier might be different in development vs production
+        let possibleBundleIds = ["pfrankov.WhisperServer", "com.whisperserver", Bundle.main.bundleIdentifier].compactMap { $0 }
+        
+        // Common model names to look for
+        let modelPatterns = [
+            "tiny", "base", "small", "medium", "large"
+        ]
+        
+        for bundleId in possibleBundleIds {
+            let modelsDir = appSupportDir.appendingPathComponent(bundleId).appendingPathComponent("Models")
+            
+            // Check if the directory exists
+            var isDir: ObjCBool = false
+            if !fileManager.fileExists(atPath: modelsDir.path, isDirectory: &isDir) || !isDir.boolValue {
+                continue
+            }
+            
+            // Get all files in the models directory
+            guard let files = try? fileManager.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: nil) else {
+                continue
+            }
+            
+            for modelName in modelPatterns {
+                // Look for bin file
+                let binFiles = files.filter { 
+                    $0.lastPathComponent.lowercased().contains(modelName) && 
+                    $0.lastPathComponent.hasSuffix(".bin") 
+                }
+                
+                // Look for encoder directory
+                let encoderDirs = files.filter { 
+                    var isDirectory: ObjCBool = false
+                    return fileManager.fileExists(atPath: $0.path, isDirectory: &isDirectory) && 
+                           isDirectory.boolValue && 
+                           $0.lastPathComponent.contains("encoder") && 
+                           $0.lastPathComponent.contains(modelName)
+                }
+                
+                if let binFile = binFiles.first, let encoderDir = encoderDirs.first {
+                    // Store these paths in UserDefaults for future use
+                    UserDefaults.standard.set(binFile.path, forKey: binPathKey)
+                    UserDefaults.standard.set(encoderDir.path, forKey: encoderDirKey)
+                    return (binFile, encoderDir)
+                }
+            }
+        }
+        
+        return nil
     }
     
     // Helper method to log request debug info
