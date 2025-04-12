@@ -56,6 +56,9 @@ final class SimpleHTTPServer {
     private let binPathKey = "CurrentModelBinPath"
     private let encoderDirKey = "CurrentModelEncoderDir"
     
+    // Flag to track if we're currently processing the first request
+    private var isHandlingFirstRequest = false
+    
     // MARK: - Initialization
     
     /// Creates a new instance of HTTP server
@@ -351,11 +354,26 @@ final class SimpleHTTPServer {
         
         print("✅ Successfully extracted audio data of size \(whisperRequest.audioData?.count ?? 0) bytes")
         
-        // Get model paths - first try from AppDelegate, then fallback to direct lookup
-        var modelPaths: (binPath: URL, encoderDir: URL)?
-        var pathError: String? = nil
+        // Check if this might be the first request requiring model initialization
+        let isFirstRequest = !isHandlingFirstRequest
+        if isFirstRequest {
+            isHandlingFirstRequest = true
+            print("🔄 This appears to be the first request, ensuring Whisper is initialized")
+        }
         
-        // First try to get paths on the main thread through AppDelegate
+        // Process the transcription request
+        processTranscriptionRequest(whisperRequest: whisperRequest, connection: connection, isFirstRequest: isFirstRequest)
+    }
+    
+    /// Processes a transcription request, handling model initialization if needed
+    /// - Parameters:
+    ///   - whisperRequest: The parsed request
+    ///   - connection: Network connection
+    ///   - isFirstRequest: Whether this is the first request after launch
+    private func processTranscriptionRequest(whisperRequest: WhisperAPIRequest, connection: NWConnection, isFirstRequest: Bool) {
+        // Attempt to get model paths - first try from AppDelegate
+        var modelPaths: (binPath: URL, encoderDir: URL)?
+        
         DispatchQueue.main.sync {
             #if os(macOS)
             if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
@@ -367,31 +385,136 @@ final class SimpleHTTPServer {
         // If we couldn't get paths via AppDelegate, try the direct lookup
         if modelPaths == nil {
             modelPaths = findModelPaths()
-            
-            if modelPaths != nil {
-                print("✅ Found model files directly")
-            } else {
-                pathError = "Could not locate valid model files"
-            }
         }
         
-        // If we still don't have paths, fail with an error
-        if modelPaths == nil {
-            DispatchQueue.main.async {
-                print("❌ Failed to perform transcription: \(pathError ?? "No model files found")")
-                self.sendErrorResponse(
-                    to: connection,
-                    message: "Transcription error: \(pathError ?? "No model files found")"
-                )
+        // If we still don't have paths and this is the first request, try to select and download tiny model
+        if modelPaths == nil && isFirstRequest {
+            print("📥 No model available - will select and download tiny model for first transcription")
+            
+            // Start model download and notify user about wait
+            downloadTinyModelIfNeeded { result in
+                switch result {
+                case .success(let paths):
+                    print("✅ Successfully downloaded tiny model")
+                    // Continue with transcription using the new model
+                    self.performTranscription(whisperRequest: whisperRequest, connection: connection, modelPaths: paths)
+                    
+                case .failure(let error):
+                    print("❌ Failed to download tiny model: \(error.localizedDescription)")
+                    DispatchQueue.main.async {
+                        self.sendErrorResponse(
+                            to: connection,
+                            message: "Failed to prepare transcription model. Please try again later."
+                        )
+                    }
+                    self.isHandlingFirstRequest = false
+                }
             }
-            return
+        } else if let paths = modelPaths {
+            // We have model paths, proceed with transcription
+            performTranscription(whisperRequest: whisperRequest, connection: connection, modelPaths: paths)
+        } else {
+            // No model available and not first request - return error
+            print("❌ No model available for transcription")
+            sendErrorResponse(
+                to: connection,
+                message: "No transcription model available. Please select a model in the app."
+            )
+            self.isHandlingFirstRequest = false
         }
+    }
+    
+    /// Downloads the tiny model if needed for first-time use
+    /// - Parameter completion: Completion handler called when download finishes
+    private func downloadTinyModelIfNeeded(completion: @escaping (Result<(binPath: URL, encoderDir: URL), Error>) -> Void) {
+        DispatchQueue.main.async {
+            #if os(macOS)
+            // Attempt to use the ModelManager via AppDelegate to select and download the tiny model
+            if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
+                // First select the tiny model
+                let modelManager = appDelegate.modelManager
+                
+                // Find the tiny model in available models
+                if let tinyModel = modelManager.availableModels.first(where: { $0.id.contains("tiny") || $0.name.contains("tiny") }) {
+                    print("🔄 Selecting tiny model for automatic download: \(tinyModel.name)")
+                    
+                    // Оповещаем UI о том, что tiny-модель была автоматически выбрана
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("TinyModelAutoSelected"),
+                        object: nil,
+                        userInfo: ["modelName": tinyModel.name, "modelId": tinyModel.id]
+                    )
+                    
+                    modelManager.selectModel(id: tinyModel.id)
+                    
+                    // Wait for model to be ready
+                    let checkInterval: TimeInterval = 0.5 // Check every half second
+                    let maxWaitTime: TimeInterval = 300 // Maximum 5 minutes wait time
+                    var elapsedTime: TimeInterval = 0
+                    
+                    // Set up timer to check model status
+                    func checkModelStatus() {
+                        if modelManager.isModelReady {
+                            print("✅ Tiny model is ready: \(tinyModel.name)")
+                            if let paths = modelManager.getModelPaths() {
+                                print("   - Bin file: \(paths.binPath.path)")
+                                print("   - Encoder dir: \(paths.encoderDir.path)")
+                                completion(.success(paths))
+                            } else {
+                                completion(.failure(NSError(domain: "SimpleHTTPServer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model is ready but paths not available"])))
+                            }
+                            return
+                        }
+                        
+                        elapsedTime += checkInterval
+                        if elapsedTime >= maxWaitTime {
+                            print("⏱️ Timeout waiting for model to be ready")
+                            completion(.failure(NSError(domain: "SimpleHTTPServer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Timeout waiting for model download"])))
+                            return
+                        }
+                        
+                        // Check again after interval
+                        DispatchQueue.main.asyncAfter(deadline: .now() + checkInterval) {
+                            checkModelStatus()
+                        }
+                    }
+                    
+                    // Start checking model status
+                    checkModelStatus()
+                } else {
+                    print("❌ Could not find tiny model in available models")
+                    completion(.failure(NSError(domain: "SimpleHTTPServer", code: 3, userInfo: [NSLocalizedDescriptionKey: "Tiny model not found in available models"])))
+                }
+            } else {
+                print("❌ Could not access AppDelegate to select tiny model")
+                completion(.failure(NSError(domain: "SimpleHTTPServer", code: 4, userInfo: [NSLocalizedDescriptionKey: "Cannot access model manager"])))
+            }
+            #else
+            // Non-macOS platforms
+            completion(.failure(NSError(domain: "SimpleHTTPServer", code: 5, userInfo: [NSLocalizedDescriptionKey: "Automatic model download not supported on this platform"])))
+            #endif
+        }
+    }
+    
+    /// Performs actual transcription with the given model paths
+    /// - Parameters:
+    ///   - whisperRequest: The request containing audio data and options
+    ///   - connection: Network connection to respond to
+    ///   - modelPaths: Paths to the model files
+    private func performTranscription(whisperRequest: WhisperAPIRequest, connection: NWConnection, modelPaths: (binPath: URL, encoderDir: URL)) {
+        // Make sure we reset the first request flag when done with this transcription
+        defer {
+            isHandlingFirstRequest = false
+        }
+        
+        // Получаем информацию о модели для логов
+        let modelName = extractModelNameFromPath(modelPaths.binPath) ?? "Unknown"
+        print("🔄 Starting transcription of audio with model: \(modelName)")
+        print("   - Using bin file: \(modelPaths.binPath.lastPathComponent)")
         
         // Perform transcription in background
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            
-            print("🔄 Starting transcription of audio")
             
             let transcription = WhisperTranscriptionService.transcribeAudioData(
                 whisperRequest.audioData!,
@@ -406,7 +529,9 @@ final class SimpleHTTPServer {
             
             DispatchQueue.main.async {
                 if let transcription = transcription {
-                    print("✅ Transcription completed successfully: \"\(transcription.prefix(50))...\"")
+                    let previewText = transcription.prefix(50) + (transcription.count > 50 ? "..." : "")
+                    print("✅ Transcription completed successfully with model \(modelName)")
+                    print("   - Result: \"\(previewText)\"")
                     self.sendTranscriptionResponse(
                         to: connection,
                         format: whisperRequest.responseFormat,
@@ -414,7 +539,7 @@ final class SimpleHTTPServer {
                         temperature: whisperRequest.temperature
                     )
                 } else {
-                    print("❌ Failed to perform transcription")
+                    print("❌ Failed to perform transcription with model \(modelName)")
                     self.sendErrorResponse(
                         to: connection,
                         message: "Transcription error: Ensure audio format is supported."
@@ -422,6 +547,25 @@ final class SimpleHTTPServer {
                 }
             }
         }
+    }
+    
+    /// Извлекает имя модели из пути к файлу модели
+    private func extractModelNameFromPath(_ path: URL) -> String? {
+        let filename = path.lastPathComponent
+        
+        // Общие названия моделей, которые могут встречаться в имени файла
+        let modelPatterns = ["tiny", "base", "small", "medium", "large"]
+        
+        // Ищем совпадения с известными паттернами моделей
+        for pattern in modelPatterns {
+            if filename.lowercased().contains(pattern) {
+                return pattern.capitalized
+            }
+        }
+        
+        // Если не нашли совпадений, возвращаем имя файла без расширения
+        let nameWithoutExt = (filename as NSString).deletingPathExtension
+        return nameWithoutExt
     }
     
     /// Finds model paths either from stored values or direct file search

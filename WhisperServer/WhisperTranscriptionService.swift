@@ -3,10 +3,16 @@ import whisper
 #if os(macOS) || os(iOS)
 import SwiftUI
 import AVFoundation
+import Darwin
 #endif
 
 /// Audio transcription service using whisper.cpp
 struct WhisperTranscriptionService {
+    // MARK: - Constants
+    
+    /// Название нотификации об активации Metal
+    static let metalActivatedNotificationName = NSNotification.Name("WhisperMetalActivated")
+    
     // MARK: - Audio Conversion
     
     /// Handles conversion of various audio formats to 16-bit, 16kHz mono WAV required by Whisper
@@ -151,6 +157,77 @@ struct WhisperTranscriptionService {
     private static var sharedContext: OpaquePointer?
     private static let lock = NSLock()
     
+    // Timeout mechanism for releasing resources after inactivity
+    private static var inactivityTimer: Timer?
+    private static var lastActivityTime = Date()
+    private static var inactivityTimeout: TimeInterval = 30.0 // Default 30 seconds inactivity timeout
+    
+    /// Sets the inactivity timeout in seconds
+    /// - Parameter seconds: Number of seconds of inactivity before resources are released
+    static func setInactivityTimeout(seconds: TimeInterval) {
+        inactivityTimeout = max(5.0, seconds) // Minimum 5 seconds
+        print("🕒 Whisper inactivity timeout set to \(Int(inactivityTimeout)) seconds")
+        
+        // Reset the timer with the new timeout if it's active
+        if inactivityTimer != nil {
+            resetInactivityTimer()
+        }
+    }
+    
+    /// Resets the inactivity timer
+    private static func resetInactivityTimer() {
+        DispatchQueue.main.async {
+            // Invalidate existing timer
+            inactivityTimer?.invalidate()
+            
+            // Update last activity time
+            lastActivityTime = Date()
+            
+            // Create new timer
+            inactivityTimer = Timer.scheduledTimer(withTimeInterval: inactivityTimeout, repeats: false) { _ in
+                checkAndReleaseResources()
+            }
+        }
+    }
+    
+    /// Checks if timeout has elapsed and releases resources if needed
+    private static func checkAndReleaseResources() {
+        let currentTime = Date()
+        let elapsedTime = currentTime.timeIntervalSince(lastActivityTime)
+        
+        if elapsedTime >= inactivityTimeout {
+            print("🕒 Inactivity timeout (\(Int(inactivityTimeout))s) reached - releasing Whisper resources")
+            lock.lock(); defer { lock.unlock() }
+            
+            if let ctx = sharedContext {
+                let memoryBefore = getMemoryUsage()
+                whisper_free(ctx)
+                sharedContext = nil
+                let memoryAfter = getMemoryUsage()
+                let freed = max(0, memoryBefore - memoryAfter)
+                print("🧹 Whisper context released due to inactivity, freed ~\(freed) MB")
+            }
+        }
+    }
+    
+    /// Получает примерное использование памяти (в МБ) для логирования
+    private static func getMemoryUsage() -> Int {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+        
+        let result: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        
+        if result == KERN_SUCCESS {
+            return Int(info.resident_size / (1024 * 1024))
+        } else {
+            return 0
+        }
+    }
+    
     /// Настраивает постоянный кэш шейдеров Metal
     private static func setupMetalShaderCache() {
         #if os(macOS) || os(iOS)
@@ -195,11 +272,19 @@ struct WhisperTranscriptionService {
     
     /// Освобождает ресурсы при завершении работы приложения
     static func cleanup() {
+        DispatchQueue.main.async {
+            inactivityTimer?.invalidate()
+            inactivityTimer = nil
+        }
+        
         lock.lock(); defer { lock.unlock() }
         if let ctx = sharedContext {
+            let memoryBefore = getMemoryUsage()
             whisper_free(ctx)
             sharedContext = nil
-            print("🧹 Whisper context released")
+            let memoryAfter = getMemoryUsage()
+            let freed = max(0, memoryBefore - memoryAfter)
+            print("🧹 Whisper context released during app termination, freed ~\(freed) MB")
         }
     }
     
@@ -207,12 +292,23 @@ struct WhisperTranscriptionService {
     static func reinitializeContext() {
         // Освобождаем текущий контекст, если он существует
         lock.lock()
+        let memoryBefore = getMemoryUsage()
         if let ctx = sharedContext {
             whisper_free(ctx)
             sharedContext = nil
-            print("🔄 Whisper context released for model change")
+            let memoryAfter = getMemoryUsage()
+            let freed = max(0, memoryBefore - memoryAfter)
+            print("🔄 Whisper context released for model change, freed ~\(freed) MB")
+        } else {
+            print("ℹ️ No Whisper context to release for model change")
         }
         lock.unlock()
+        
+        // Reset the inactivity timer
+        DispatchQueue.main.async {
+            inactivityTimer?.invalidate()
+            inactivityTimer = nil
+        }
         
         // Контекст будет переинициализирован при следующем вызове transcribeAudioData
         // или preloadModelForShaderCaching автоматически
@@ -397,25 +493,32 @@ struct WhisperTranscriptionService {
     ///   - modelPaths: Optional model paths to use for initialization if context doesn't exist
     /// - Returns: String with transcription result or nil in case of error
     static func transcribeAudioData(_ audioData: Data, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> String? {
+        // Reset the inactivity timer since we're using Whisper now
+        resetInactivityTimer()
+        
+        // Extract model name for logging
+        let modelName = extractModelNameFromPath(modelPaths?.binPath)
+        
         // Получаем или инициализируем контекст
         let context: OpaquePointer
+        let isNewContext: Bool
         
         lock.lock()
         
         // Check if we have an existing context
         if let existingContext = sharedContext {
-            print("✅ Using existing Whisper context")
+            print("✅ Using existing Whisper context for model: \(modelName ?? "Unknown")")
             context = existingContext
+            isNewContext = false
             lock.unlock()
         } else {
             // We need to initialize a new context
-            print("🔄 Initializing Whisper context (this may take a while on first run)")
+            print("🔄 Initializing new Whisper context for model: \(modelName ?? "Unknown")")
+            let memoryBefore = getMemoryUsage()
             
             // Determine how to get model paths - either use the provided paths or fail
             if let paths = modelPaths {
-                print("🔄 Using provided model paths for initialization:")
-                print("   - Bin path: \(paths.binPath.path)")
-                print("   - Encoder dir: \(paths.encoderDir.path)")
+                print("🔄 Using provided model paths for initialization")
                 
                 // Verify that the files exist and are readable
                 let fileManager = FileManager.default
@@ -440,7 +543,21 @@ struct WhisperTranscriptionService {
                 
                 sharedContext = newContext
                 context = newContext
-                print("✅ Successfully initialized new Whisper context with provided model paths")
+                isNewContext = true
+                
+                let memoryAfter = getMemoryUsage()
+                let used = max(0, memoryAfter - memoryBefore)
+                print("✅ Successfully initialized new Whisper context, using ~\(used) MB")
+                
+                // Отправляем нотификацию о том, что Metal активирован
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: metalActivatedNotificationName,
+                        object: nil,
+                        userInfo: ["modelName": modelName ?? "Unknown"]
+                    )
+                }
+                
                 lock.unlock()
             } else {
                 // We don't have model paths and we're in a background thread - cannot proceed
@@ -502,5 +619,21 @@ struct WhisperTranscriptionService {
         }
         
         return transcription.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    /// Extracts model name from URL path for better logging
+    private static func extractModelNameFromPath(_ path: URL?) -> String? {
+        guard let path = path else { return nil }
+        
+        let filename = path.lastPathComponent
+        let modelPatterns = ["tiny", "base", "small", "medium", "large"]
+        
+        for pattern in modelPatterns {
+            if filename.lowercased().contains(pattern) {
+                return pattern.capitalized
+            }
+        }
+        
+        return (filename as NSString).deletingPathExtension
     }
 }

@@ -37,6 +37,13 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
             checkAndPrepareSelectedModel() // Check/download when selection changes
         }
     }
+    
+    /// Имя выбранной модели, для отображения в интерфейсе и логирования
+    var selectedModelName: String? {
+        guard let modelID = selectedModelID else { return nil }
+        return availableModels.first(where: { $0.id == modelID })?.name
+    }
+    
     @Published private(set) var currentStatus: String = "Initializing..." {
         didSet {
             // Post notification when status changes

@@ -23,6 +23,13 @@ struct WhisperServerApp: App {
 
 /// Application delegate that manages the HTTP server and menu bar integration
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Enum for tagging menu items for easy reference
+    enum MenuItemTags: Int {
+        case status = 1000
+        case server = 1001
+        // Add more tags as needed
+    }
+    
     // MARK: - Properties
     
     /// Menu bar item
@@ -61,7 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup notification observers
         setupNotificationObservers()
         
-        // We'll start the Metal preloading and server after model is ready
+        // Start the server immediately regardless of model readiness
+        startServer()
+        
+        // Begin model preparation in the background
         updateUIForModelPreparation()
     }
     
@@ -117,11 +127,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     
                     // Обновляем статус Metal в интерфейсе на "Ready"
                     self.updateStatusMenuItem(metalCaching: false, failed: false)
-                    
-                    // После успешной загрузки шейдеров пробуем запустить сервер автоматически
-                    if self.autoStartServer {
-                        self.startServer()
-                    }
                 } else {
                     self.preloadStatusText = "Ошибка компиляции шейдеров"
                     print("❌ Metal shader preloading failed after \(formattedTime) seconds")
@@ -166,34 +171,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSNotification.Name("ModelManagerProgressChanged"),
             object: nil
         )
+        
+        // Metal активирован при первом запросе
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleMetalActivated),
+            name: WhisperTranscriptionService.metalActivatedNotificationName,
+            object: nil
+        )
+        
+        // Tiny-модель была автоматически выбрана
+        NotificationCenter.default.addObserver(
+            self, 
+            selector: #selector(handleTinyModelAutoSelected),
+            name: NSNotification.Name("TinyModelAutoSelected"), 
+            object: nil
+        )
     }
     
     /// Update UI to reflect model preparation
     private func updateUIForModelPreparation() {
-        guard let menu = statusItem.menu else { return }
-        
-        let metalItem = menu.items[0]
-        let serverItem = menu.items[1]
-        
-        // Update status items based on model manager state
-        if modelManager.isModelReady {
-            // If model is already ready, proceed with Metal initialization and server start
-            #if os(macOS) || os(iOS)
-            preloadMetalShaders()
-            #else
-            startServer()
-            #endif
-        } else {
-            // Model is not ready, show preparation status
-            metalItem.title = "Metal: Waiting for model..."
-            metalItem.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             
-            serverItem.title = "Server: Waiting for model..."
-            serverItem.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)
+            // Сбрасываем статус Metal на "неактивно" при смене модели
+            let selectedModel = self.modelManager.selectedModelName ?? "Unknown"
+            print("🔄 Resetting Metal status while preparing model: \(selectedModel)")
             
-            // Update button tooltip
-            if let button = statusItem.button {
-                button.toolTip = "WhisperServer - Preparing model..."
+            if let item = self.statusItem, let button = item.button {
+                button.image = NSImage(systemSymbolName: "sleep", accessibilityDescription: "Sleep")
+                
+                // Обновляем текст в меню
+                if let statusMenuItem = self.statusItem.menu?.item(withTag: MenuItemTags.status.rawValue) {
+                    statusMenuItem.title = "Inactive (will initialize on first request)"
+                    statusMenuItem.image = NSImage(systemSymbolName: "sleep", accessibilityDescription: "Sleep")
+                }
             }
         }
     }
@@ -202,53 +214,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc private func handleModelReady() {
         DispatchQueue.main.async { [weak self] in
-            print("✅ Model is ready, proceeding with initialization")
+            print("✅ Model is ready, but Whisper will only initialize on first request")
             
             // Double-check model is actually ready
             guard let self = self, self.modelManager.isModelReady else {
-                print("⚠️ Model was reported ready but isModelReady is false - skipping initialization")
+                print("⚠️ Model was reported ready but isModelReady is false")
                 return
             }
             
             // Verify that we can get model paths
             if let paths = self.modelManager.getPathsForSelectedModel() {
-                print("✅ Verified model paths are available:")
+                let modelName = self.modelManager.selectedModelName ?? "Unknown"
+                print("✅ Verified model paths are available for model: \(modelName)")
                 print("   - Bin file: \(paths.binPath.path)")
                 print("   - Encoder dir: \(paths.encoderDir.path)")
                 
-                // Ensure paths are valid and accessible
-                let fileManager = FileManager.default
-                if !fileManager.fileExists(atPath: paths.binPath.path) {
-                    print("❌ Model bin file does not exist at path: \(paths.binPath.path)")
-                    self.handleModelPreparationFailed()
-                    return
+                // Store the model paths in UserDefaults so they can be recovered if AppDelegate becomes inaccessible
+                self.storeCurrentModelPaths(binPath: paths.binPath.path, encoderDir: paths.encoderDir.path)
+                
+                // Update the status menu to show that we're ready for first request
+                if let menu = self.statusItem.menu, let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
+                    metalItem.title = "Metal: Inactive (will initialize on first request)"
+                    metalItem.image = NSImage(systemSymbolName: "sleep", accessibilityDescription: nil)
                 }
-                
-                // Release existing Whisper context
-                WhisperTranscriptionService.reinitializeContext()
-                
-                // Preload the model with the updated paths to ensure it's ready
-                let preloadSuccess = WhisperTranscriptionService.preloadModelForShaderCaching(
-                    modelBinPath: paths.binPath,
-                    modelEncoderDir: paths.encoderDir
-                )
-                
-                if preloadSuccess {
-                    print("✅ Successfully preloaded new model")
-                    // Store the model paths in UserDefaults so they can be recovered if AppDelegate becomes inaccessible
-                    self.storeCurrentModelPaths(binPath: paths.binPath.path, encoderDir: paths.encoderDir.path)
-                } else {
-                    print("⚠️ Failed to preload new model - will try on first transcription request")
-                }
-                
-                // If model is already ready, proceed with Metal initialization and server start
-                #if os(macOS) || os(iOS)
-                self.preloadMetalShaders()
-                #else
-                self.startServer()
-                #endif
             } else {
-                print("❌ Model reported ready but paths unavailable - cannot proceed")
+                print("❌ Model reported ready but paths unavailable")
                 self.handleModelPreparationFailed()
             }
         }
@@ -268,14 +258,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             print("❌ Model preparation failed")
             
             // Update menu items to show error
-            let metalItem = menu.items[0]
-            let serverItem = menu.items[1]
+            let metalItem = menu.item(withTag: MenuItemTags.status.rawValue)
+            let serverItem = menu.item(withTag: MenuItemTags.server.rawValue)
             
-            metalItem.title = "Metal: Model unavailable"
-            metalItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+            metalItem?.title = "Metal: Model unavailable"
+            metalItem?.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
             
-            serverItem.title = "Server: Cannot start (model error)"
-            serverItem.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
+            serverItem?.title = "Server: Cannot start (model error)"
+            serverItem?.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
             
             // Update button tooltip
             if let button = self.statusItem.button {
@@ -288,23 +278,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let menu = self.statusItem.menu else { return }
             
-            // Update model status in menu
+            // Update model status in menu only if it's a special status (downloading, etc.)
             let status = self.modelManager.currentStatus
             print("📝 Model status changed: \(status)")
             
-            // Add or update a status item if it doesn't exist
+            // Decide whether to show the status item based on the status content
+            let shouldShowStatus = status.lowercased().contains("download") || 
+                                 status.lowercased().contains("error") || 
+                                 status.lowercased().contains("preparing")
+            
+            // Find existing status item
             let statusIndex = menu.items.firstIndex(where: { $0.title.hasPrefix("Model:") }) ?? -1
             
-            if statusIndex >= 0 {
-                // Update existing item
-                menu.items[statusIndex].title = "Model: \(status)"
+            if shouldShowStatus {
+                if statusIndex >= 0 {
+                    // Update existing item
+                    menu.items[statusIndex].title = "Model: \(status)"
+                } else {
+                    // Status item doesn't exist, find where to insert it
+                    let insertIndex = menu.items.firstIndex(where: { $0.isSeparatorItem }) ?? 0
+                    
+                    // Create and insert new status item
+                    let statusItem = NSMenuItem(title: "Model: \(status)", action: nil, keyEquivalent: "")
+                    menu.insertItem(statusItem, at: insertIndex)
+                }
             } else {
-                // Status item doesn't exist, find where to insert it
-                let insertIndex = menu.items.firstIndex(where: { $0.isSeparatorItem }) ?? 0
-                
-                // Create and insert new status item
-                let statusItem = NSMenuItem(title: "Model: \(status)", action: nil, keyEquivalent: "")
-                menu.insertItem(statusItem, at: insertIndex)
+                // Remove status item if it exists and we don't need to show it
+                if statusIndex >= 0 {
+                    menu.removeItem(at: statusIndex)
+                }
             }
         }
     }
@@ -344,6 +346,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    /// Обрабатывает уведомление о том, что Metal был активирован
+    @objc private func handleMetalActivated(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Получаем имя модели из notification
+            let modelName = notification.userInfo?["modelName"] as? String ?? "Unknown"
+            print("🔥 Metal activated with model: \(modelName)")
+            
+            // Обновляем статус Metal в меню на "активный" и обновляем информацию о модели
+            self.updateMetalStatusWithModel(modelName: modelName)
+        }
+    }
+    
+    /// Обновляет статус Metal с указанием активной модели
+    private func updateMetalStatusWithModel(modelName: String) {
+        if let menu = statusItem.menu, let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
+            metalItem.title = "Metal: Active with \(modelName) model (GPU acceleration)"
+            metalItem.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
+            
+            // Обновляем иконку в статус-баре
+            if let button = statusItem.button {
+                button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "WhisperServer")
+                button.toolTip = "WhisperServer - Active with \(modelName) model"
+            }
+        }
+    }
+    
     /// Обновляет отображение статуса в меню
     private func updateStatusMenuItem(metalCaching: Bool, failed: Bool = false) {
         // Обновляем иконку в статус-баре
@@ -353,9 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         // Обновляем статус в меню
-        if let menu = statusItem.menu, menu.items.count > 0 {
-            let metalItem = menu.items[0]
-            
+        if let menu = statusItem.menu, let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
             if metalCaching {
                 metalItem.title = "Metal: Caching shaders..."
                 metalItem.image = NSImage(systemSymbolName: "arrow.clockwise.circle", 
@@ -365,7 +393,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 metalItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", 
                                         accessibilityDescription: nil)
             } else {
-                metalItem.title = "Metal: Ready (GPU acceleration)"
+                // Для обычного статуса "Active" используем updateMetalStatusWithModel
+                // Этот кейс оставляем для обратной совместимости
+                let modelName = modelManager.selectedModelName ?? "Unknown"
+                metalItem.title = "Metal: Active (GPU acceleration)"
                 metalItem.image = NSImage(systemSymbolName: "checkmark.circle.fill", 
                                         accessibilityDescription: nil)
             }
@@ -387,11 +418,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let metalItem = NSMenuItem(title: "Metal: Initializing...", action: nil, keyEquivalent: "")
         metalItem.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)
         metalItem.toolTip = "GPU acceleration status - Loading shaders for faster transcription"
+        metalItem.tag = MenuItemTags.status.rawValue
         menu.addItem(metalItem)
         
         // Статус сервера
         let serverItem = NSMenuItem(title: "Server: Waiting for initialization...", action: nil, keyEquivalent: "")
         serverItem.toolTip = "HTTP server will start after initialization is complete"
+        serverItem.tag = MenuItemTags.server.rawValue
         menu.addItem(serverItem)
         
         // Add model selection submenu
@@ -463,8 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             
             // Обновляем статус на "запускается" сразу
             DispatchQueue.main.async {
-                if let menu = self.statusItem.menu, menu.items.count > 1 {
-                    let serverItem = menu.items[1]
+                if let menu = self.statusItem.menu, let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) {
                     serverItem.title = "Server: Starting on port \(port)..."
                     serverItem.image = NSImage(systemSymbolName: "network", accessibilityDescription: nil)
                 }
@@ -495,9 +527,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Helper method to update server status in menu
     private func updateServerStatusMenuItem(running: Bool, port: UInt16? = nil, error: String? = nil) {
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, let menu = self.statusItem.menu, menu.items.count > 1 else { return }
-            
-            let serverItem = menu.items[1]
+            guard let self = self, let menu = self.statusItem.menu, 
+                  let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) else { return }
             
             if running {
                 let currentPort = port ?? self.serverPort
@@ -593,9 +624,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Если процесс запуска был в процессе, обновляем UI, чтобы показать, что он был остановлен
         if isStartingServer {
             DispatchQueue.main.async { [weak self] in
-                guard let self = self, let menu = self.statusItem.menu, menu.items.count > 1 else { return }
+                guard let self = self, let menu = self.statusItem.menu, 
+                      let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) else { return }
                 
-                let serverItem = menu.items[1]
                 serverItem.title = "Server: Stopped"
                 serverItem.image = NSImage(systemSymbolName: "multiply.circle", accessibilityDescription: nil)
             }
@@ -612,6 +643,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Проверяем, изменился ли выбор модели
         if modelId != modelManager.selectedModelID {
+            // Получаем имя модели для логирования
+            let modelName = modelManager.availableModels.first(where: { $0.id == modelId })?.name ?? "Unknown"
+            print("🔄 Changing model to: \(modelName) (id: \(modelId))")
+            
             // Останавливаем сервер перед сменой модели
             stopServer()
             
@@ -626,6 +661,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             
             // Обновляем UI, чтобы показать, что мы ожидаем подготовки новой модели
             updateUIForModelPreparation()
+            
+            // Сразу запускаем сервер после смены модели
+            startServer()
         }
     }
     
@@ -663,6 +701,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc private func quitApp() {
         NSApp.terminate(self)
+    }
+    
+    /// Обрабатывает уведомление о том, что tiny-модель была автоматически выбрана
+    @objc private func handleTinyModelAutoSelected(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let menu = self.statusItem.menu else { return }
+            
+            // Получаем информацию о модели
+            let modelName = notification.userInfo?["modelName"] as? String ?? "Tiny"
+            
+            // Обновляем статус в меню
+            if let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
+                metalItem.title = "Metal: Waiting for \(modelName) model to download"
+                metalItem.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            }
+            
+            // Обновляем тултип кнопки
+            if let button = self.statusItem.button {
+                button.toolTip = "WhisperServer - Downloading \(modelName) model"
+            }
+            
+            print("🔄 Auto-selected and downloading \(modelName) model")
+        }
     }
 }
 

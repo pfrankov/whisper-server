@@ -1,7 +1,7 @@
 [
   {
     "id": "tiny-q5_1",
-    "name": "Tiny (Q5_1, ~47MB)",
+    "name": "Tiny (~47MB)",
     "files": [
       {
         "filename": "ggml-tiny-q5_1.bin",
@@ -16,8 +16,24 @@
     ]
   },
   {
+    "id": "medium-q5_0",
+    "name": "Medium (~539MB)",
+    "files": [
+      {
+        "filename": "ggml-medium-q5_0.bin",
+        "url": "https://huggingface.co/pfrankov/whisper-server/resolve/main/ggml-medium-q5_0.bin",
+        "type": "bin"
+      },
+      {
+        "filename": "ggml-medium-encoder.mlmodelc.zip",
+        "url": "https://huggingface.co/pfrankov/whisper-server/resolve/main/ggml-medium-encoder.mlmodelc.zip",
+        "type": "zip"
+      }
+    ]
+  },
+  {
     "id": "large-v3-turbo-q5_0",
-    "name": "Large v3 Turbo (Q5_0, ~1.7GB)",
+    "name": "Large v3 Turbo (~1.7GB)",
     "files": [
       {
         "filename": "ggml-large-v3-turbo-q5_0.bin",
