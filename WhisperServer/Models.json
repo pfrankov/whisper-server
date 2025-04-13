@@ -17,7 +17,7 @@
   },
   {
     "id": "medium-q5_0",
-    "name": "Medium (~539MB)",
+    "name": "Medium (~1GB)",
     "files": [
       {
         "filename": "ggml-medium-q5_0.bin",
