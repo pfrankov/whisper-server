@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		8D121C872DF89FC200F25B13 /* Vapor in Frameworks */ = {isa = PBXBuildFile; productRef = 8D121C862DF89FC200F25B13 /* Vapor */; };
 		8D28D83B2D93739300079B61 /* whisper.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8D28D83A2D93739300079B61 /* whisper.xcframework */; };
 		8D28D83C2D93739300079B61 /* whisper.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 8D28D83A2D93739300079B61 /* whisper.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -73,6 +74,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				8D28D83B2D93739300079B61 /* whisper.xcframework in Frameworks */,
+				8D121C872DF89FC200F25B13 /* Vapor in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -143,6 +145,7 @@
 			);
 			name = WhisperServer;
 			packageProductDependencies = (
+				8D121C862DF89FC200F25B13 /* Vapor */,
 			);
 			productName = WhisperServer;
 			productReference = 8DE541C52D919CCF0015BF48 /* WhisperServer.app */;
@@ -226,6 +229,9 @@
 			);
 			mainGroup = 8DE541BC2D919CCF0015BF48;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				8D121C852DF89FC200F25B13 /* XCRemoteSwiftPackageReference "vapor" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 8DE541C62D919CCF0015BF48 /* Products */;
 			projectDirPath = "";
@@ -593,6 +599,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		8D121C852DF89FC200F25B13 /* XCRemoteSwiftPackageReference "vapor" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/vapor/vapor.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.115.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		8D121C862DF89FC200F25B13 /* Vapor */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8D121C852DF89FC200F25B13 /* XCRemoteSwiftPackageReference "vapor" */;
+			productName = Vapor;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8DE541BD2D919CCF0015BF48 /* Project object */;
 }

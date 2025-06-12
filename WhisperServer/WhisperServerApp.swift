@@ -9,6 +9,7 @@ import SwiftUI
 #if os(macOS) || os(iOS)
 import Metal
 #endif
+import Vapor
 
 @main
 struct WhisperServerApp: App {
@@ -35,11 +36,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Menu bar item
     private var statusItem: NSStatusItem!
     
-    /// HTTP server instance
-    private var httpServer: SimpleHTTPServer?
+    /// Vapor server instance
+    private var vaporServer: VaporServer?
     
     /// The port the server listens on
-    private let serverPort: UInt16 = 12017
+    private let serverPort: Int = 12017
     
     /// Model manager instance
     let modelManager = ModelManager()
@@ -53,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Whether to automatically start server after initialization
     private var autoStartServer: Bool = true
     
-    /// Флаг, указывающий, выполняется ли процесс запуска сервера в данный момент
+    /// A flag indicating whether the server is currently starting up
     private var isStartingServer: Bool = false
     
     // MARK: - Application Lifecycle
@@ -68,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup notification observers
         setupNotificationObservers()
         
-        // Start the server immediately regardless of model readiness
+        // Start the server
         startServer()
         
         // Begin model preparation in the background
@@ -82,9 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     // MARK: - Private Methods
     
-    /// Предварительно загружает шейдеры Metal и запускает сервер после завершения
+    /// Preloads Metal shaders and starts the server upon completion
     func preloadMetalShaders() {
-        // Предотвращаем параллельный запуск
+        // Prevent parallel execution
         if isPreloadingShaders {
             print("⚠️ Metal shader preloading already in progress, skipping duplicate request")
             return
@@ -122,13 +123,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let formattedTime = String(format: "%.2f", elapsedTime)
                 
                 if success {
-                    self.preloadStatusText = "Компиляция шейдеров завершена успешно за \(formattedTime) сек."
+                    self.preloadStatusText = "Shader compilation finished successfully in \(formattedTime) sec."
                     print("✅ Metal shader preloading completed in \(formattedTime) seconds")
                     
                     // Обновляем статус Metal в интерфейсе на "Ready"
                     self.updateStatusMenuItem(metalCaching: false, failed: false)
                 } else {
-                    self.preloadStatusText = "Ошибка компиляции шейдеров"
+                    self.preloadStatusText = "Shader compilation error"
                     print("❌ Metal shader preloading failed after \(formattedTime) seconds")
                     
                     // Обновляем статус Metal в интерфейсе как "Failed"
@@ -172,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         
-        // Metal активирован при первом запросе
+        // Metal is activated on the first request
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleMetalActivated),
@@ -180,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         
-        // Tiny-модель была автоматически выбрана
+        // Tiny model was auto-selected
         NotificationCenter.default.addObserver(
             self, 
             selector: #selector(handleTinyModelAutoSelected),
@@ -253,24 +254,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc private func handleModelPreparationFailed() {
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, let menu = self.statusItem.menu else { return }
+            guard let self = self else { return }
+            print("❌ Model preparation failed notification received")
             
-            print("❌ Model preparation failed")
+            self.updateServerStatusMenuItem()
             
-            // Update menu items to show error
-            let metalItem = menu.item(withTag: MenuItemTags.status.rawValue)
-            let serverItem = menu.item(withTag: MenuItemTags.server.rawValue)
-            
-            metalItem?.title = "Metal: Model unavailable"
-            metalItem?.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
-            
-            serverItem?.title = "Server: Cannot start (model error)"
-            serverItem?.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
-            
-            // Update button tooltip
-            if let button = self.statusItem.button {
-                button.toolTip = "WhisperServer - Model preparation failed"
+            // Update status menu to reflect failure
+            if let menu = self.statusItem.menu, let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
+                metalItem.title = "Metal: Model unavailable"
+                metalItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
             }
+            
+            self.updateUIForModelPreparation()
+            self.updateServerStatusMenuItem()
         }
     }
     
@@ -343,46 +339,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
+            
+            // Update server status
+            self.updateServerStatusMenuItem()
         }
     }
     
-    /// Обрабатывает уведомление о том, что Metal был активирован
+    /// Handles the notification that the tiny model was auto-selected
+    @objc private func handleTinyModelAutoSelected(notification: Notification) {
+        DispatchQueue.main.async {
+            self.updateServerStatusMenuItem()
+        }
+    }
+    
+    /// Handles the notification that Metal has been activated
     @objc private func handleMetalActivated(_ notification: Notification) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
-            // Получаем имя модели из notification
+            // Get model name from notification
             let modelName = notification.userInfo?["modelName"] as? String ?? "Unknown"
             print("🔥 Metal activated with model: \(modelName)")
             
-            // Обновляем статус Metal в меню на "активный" и обновляем информацию о модели
+            // Update the Metal status in the menu to "active" and update model info
             self.updateMetalStatusWithModel(modelName: modelName)
         }
     }
     
-    /// Обновляет статус Metal с указанием активной модели
+    /// Updates the Metal status with the name of the active model
     private func updateMetalStatusWithModel(modelName: String) {
         if let menu = statusItem.menu, let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
             metalItem.title = "Metal: Active with \(modelName) model (GPU acceleration)"
             metalItem.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
             
-            // Обновляем иконку в статус-баре
+            // Update the icon in the status bar
             if let button = statusItem.button {
                 button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "WhisperServer")
                 button.toolTip = "WhisperServer - Active with \(modelName) model"
             }
         }
+        
+        // Update server status
+        self.updateServerStatusMenuItem()
     }
     
-    /// Обновляет отображение статуса в меню
+    /// Updates the status display in the menu
     private func updateStatusMenuItem(metalCaching: Bool, failed: Bool = false) {
-        // Обновляем иконку в статус-баре
+        // Update the icon in the status bar
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: metalCaching ? "rays" : "waveform", 
                                   accessibilityDescription: "WhisperServer")
         }
         
-        // Обновляем статус в меню
+        // Update the status in the menu
         if let menu = statusItem.menu, let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
             if metalCaching {
                 metalItem.title = "Metal: Caching shaders..."
@@ -393,9 +402,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 metalItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", 
                                         accessibilityDescription: nil)
             } else {
-                // Для обычного статуса "Active" используем updateMetalStatusWithModel
-                // Этот кейс оставляем для обратной совместимости
-                let modelName = modelManager.selectedModelName ?? "Unknown"
+                // For the normal "Active" status, use updateMetalStatusWithModel
+                // This case is left for backward compatibility
+                _ = modelManager.selectedModelName ?? "Unknown"
                 metalItem.title = "Metal: Active (GPU acceleration)"
                 metalItem.image = NSImage(systemSymbolName: "checkmark.circle.fill", 
                                         accessibilityDescription: nil)
@@ -414,14 +423,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         let menu = NSMenu()
         
-        // Статус Metal
+        // Metal status
         let metalItem = NSMenuItem(title: "Metal: Initializing...", action: nil, keyEquivalent: "")
         metalItem.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)
         metalItem.toolTip = "GPU acceleration status - Loading shaders for faster transcription"
         metalItem.tag = MenuItemTags.status.rawValue
         menu.addItem(metalItem)
         
-        // Статус сервера
+        // Server status
         let serverItem = NSMenuItem(title: "Server: Waiting for initialization...", action: nil, keyEquivalent: "")
         serverItem.toolTip = "HTTP server will start after initialization is complete"
         serverItem.tag = MenuItemTags.server.rawValue
@@ -462,177 +471,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Subscribe to model manager updates to refresh the menu when needed
         NotificationCenter.default.addObserver(self, selector: #selector(refreshModelSelectionMenu), name: NSNotification.Name("ModelManagerDidUpdate"), object: nil)
+        
+        // Update UI
+        self.updateUIForModelPreparation()
+        self.updateServerStatusMenuItem()
+    }
+    
+    /// Starts the HTTP server
+    @objc private func toggleServer() {
+        if let server = vaporServer, server.isRunning {
+            stopServer()
+        } else {
+            startServer()
+        }
     }
     
     /// Starts the HTTP server
     private func startServer() {
-        // Проверяем, не запущен ли уже сервер и не выполняется ли процесс запуска
-        if isStartingServer {
-            print("⚠️ Server startup already in progress, skipping duplicate request")
-            return
+        if vaporServer == nil {
+            vaporServer = VaporServer(port: serverPort, modelManager: self.modelManager)
         }
         
-        // Проверяем, не запущен ли уже сервер
-        if let existingServer = httpServer, existingServer.isRunning {
-            print("⚠️ HTTP server is already running, not starting a new one")
-            updateServerStatusMenuItem(running: true)
-            return
-        }
-        
-        // Устанавливаем флаг, что мы начали процесс запуска
-        isStartingServer = true
-        print("✅ Starting HTTP server on port \(serverPort)")
-        
-        // Останавливаем предыдущий экземпляр сервера, если он существует
-        stopServer()
-        
-        // Небольшая задержка для гарантии освобождения ресурсов
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
-            
-            // Найдем свободный порт, начиная с serverPort
-            let port = self.findAvailablePort(startingFrom: self.serverPort)
-            print("🔄 Using port: \(port)")
-            
-            // Обновляем статус на "запускается" сразу
-            DispatchQueue.main.async {
-                if let menu = self.statusItem.menu, let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) {
-                    serverItem.title = "Server: Starting on port \(port)..."
-                    serverItem.image = NSImage(systemSymbolName: "network", accessibilityDescription: nil)
-                }
+        // If server isn't running, start it
+        if let server = vaporServer, !server.isRunning {
+            server.start()
+            // The Vapor server starts asynchronously. We need to wait a bit before updating the UI.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.updateServerStatusMenuItem()
             }
-            
-            // Создаем и запускаем сервер на свободном порту
-            self.httpServer = SimpleHTTPServer(port: port)
-            self.httpServer?.start()
-            
-            // Проверим статус после небольшой задержки
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self = self else { return }
-                
-                // Сбрасываем флаг запуска
-                self.isStartingServer = false
-                
-                if let httpServer = self.httpServer, !httpServer.isRunning {
-                    print("❌ Failed to start HTTP server on port \(port)")
-                    self.updateServerStatusMenuItem(running: false, error: "Could not start server")
-                } else if self.httpServer != nil {
-                    print("✅ HTTP server started successfully on port \(port)")
-                    self.updateServerStatusMenuItem(running: true, port: port)
-                }
-            }
+        } else {
+            print("✅ Server is already running or starting")
+            updateServerStatusMenuItem()
         }
-    }
-    
-    /// Helper method to update server status in menu
-    private func updateServerStatusMenuItem(running: Bool, port: UInt16? = nil, error: String? = nil) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self, let menu = self.statusItem.menu, 
-                  let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) else { return }
-            
-            if running {
-                let currentPort = port ?? self.serverPort
-                serverItem.title = "Server: Running on port \(currentPort)"
-                serverItem.image = NSImage(systemSymbolName: "network", accessibilityDescription: nil)
-                
-                // Обновляем tooltip в статус-баре
-                if let button = self.statusItem.button {
-                    button.toolTip = "WhisperServer running on port \(currentPort)"
-                }
-            } else {
-                let errorMessage = error != nil ? ": \(error!)" : ""
-                serverItem.title = "Server: Failed to start\(errorMessage)"
-                serverItem.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
-            }
-        }
-    }
-    
-    /// Find an available port to use
-    private func findAvailablePort(startingFrom: UInt16) -> UInt16 {
-        var port = startingFrom
-        let maxPort: UInt16 = 65535
-        let maxAttempts = 20 // Ограничим количество попыток
-        var attempts = 0
-        
-        print("🔍 Searching for available port starting from \(startingFrom)")
-        
-        while port < maxPort && attempts < maxAttempts {
-            attempts += 1
-            let socketFD = socket(AF_INET, SOCK_STREAM, 0)
-            if socketFD != -1 {
-                var addr = sockaddr_in()
-                addr.sin_family = sa_family_t(AF_INET)
-                addr.sin_port = port.bigEndian
-                addr.sin_addr.s_addr = INADDR_ANY.bigEndian
-                
-                // Настройка опции повторного использования адреса
-                var optval: Int32 = 1
-                setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &optval, socklen_t(MemoryLayout<Int32>.size))
-                
-                let addrSize = UInt32(MemoryLayout<sockaddr_in>.size)
-                let bindResult = withUnsafePointer(to: &addr) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                        Darwin.bind(socketFD, sockaddrPtr, addrSize)
-                    }
-                }
-                
-                // Пробуем также выполнить listen() для полной проверки
-                var isAvailable = false
-                if bindResult == 0 {
-                    let listenResult = Darwin.listen(socketFD, 1)
-                    isAvailable = (listenResult == 0)
-                }
-                
-                // Обязательно закрываем сокет
-                Darwin.close(socketFD)
-                
-                if isAvailable {
-                    print("✅ Found available port: \(port)")
-                    return port
-                }
-            }
-            
-            print("❌ Port \(port) is not available, trying next...")
-            port += 1
-        }
-        
-        // Если не нашли свободный порт, выберем случайный в диапазоне выше 49152 (ephemeral ports)
-        if attempts >= maxAttempts {
-            let randomPort = UInt16.random(in: 49152...65000)
-            print("⚠️ Could not find available port after \(attempts) attempts. Using random port: \(randomPort)")
-            return randomPort
-        }
-        
-        return startingFrom // fallback to original port if we can't find an available one (unlikely)
     }
     
     /// Stops the HTTP server
     private func stopServer() {
-        if let server = httpServer {
-            print("🛑 Stopping HTTP server...")
-            
-            if server.isRunning {
-                server.stop()
-                print("✅ HTTP server stopped successfully")
-            } else {
-                print("ℹ️ HTTP server was not running")
+        vaporServer?.stop()
+        vaporServer = nil // Release the instance
+        updateServerStatusMenuItem()
+    }
+    
+    /// Updates server status menu item text and state
+    private func updateServerStatusMenuItem() {
+        DispatchQueue.main.async {
+            if let menu = self.statusItem.menu, let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) {
+                if let server = self.vaporServer, server.isRunning {
+                    serverItem.title = "Server: Running on port \(self.serverPort)"
+                    serverItem.state = .on
+                } else {
+                    serverItem.title = "Server: Stopped"
+                    serverItem.state = .off
+                }
             }
-            
-            httpServer = nil
-        }
-        
-        // Если процесс запуска был в процессе, обновляем UI, чтобы показать, что он был остановлен
-        if isStartingServer {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, let menu = self.statusItem.menu, 
-                      let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) else { return }
-                
-                serverItem.title = "Server: Stopped"
-                serverItem.image = NSImage(systemSymbolName: "multiply.circle", accessibilityDescription: nil)
-            }
-            
-            // Сбрасываем флаг запуска
-            isStartingServer = false
         }
     }
     
@@ -701,29 +592,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc private func quitApp() {
         NSApp.terminate(self)
-    }
-    
-    /// Обрабатывает уведомление о том, что tiny-модель была автоматически выбрана
-    @objc private func handleTinyModelAutoSelected(_ notification: Notification) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self, let menu = self.statusItem.menu else { return }
-            
-            // Получаем информацию о модели
-            let modelName = notification.userInfo?["modelName"] as? String ?? "Tiny"
-            
-            // Обновляем статус в меню
-            if let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
-                metalItem.title = "Metal: Waiting for \(modelName) model to download"
-                metalItem.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
-            }
-            
-            // Обновляем тултип кнопки
-            if let button = self.statusItem.button {
-                button.toolTip = "WhisperServer - Downloading \(modelName) model"
-            }
-            
-            print("🔄 Auto-selected and downloading \(modelName) model")
-        }
     }
 }
 

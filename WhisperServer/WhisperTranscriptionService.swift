@@ -10,7 +10,7 @@ import Darwin
 struct WhisperTranscriptionService {
     // MARK: - Constants
     
-    /// Название нотификации об активации Metal
+    /// Notification name for when Metal is activated
     static let metalActivatedNotificationName = NSNotification.Name("WhisperMetalActivated")
     
     // MARK: - Audio Conversion
@@ -18,11 +18,11 @@ struct WhisperTranscriptionService {
     /// Handles conversion of various audio formats to 16-bit, 16kHz mono WAV required by Whisper
     class AudioConverter {
         /// Converts audio data from any supported format to the format required by Whisper
-        /// - Parameter audioData: Original audio data in any format (mp3, m4a, ogg, wav, etc.)
+        /// - Parameter audioURL: URL of the original audio file
         /// - Returns: Converted audio data as PCM 16-bit 16kHz mono samples, or nil if conversion failed
-        static func convertToWhisperFormat(_ audioData: Data) -> [Float]? {
+        static func convertToWhisperFormat(from audioURL: URL) -> [Float]? {
             #if os(macOS) || os(iOS)
-            return convertUsingAVFoundation(audioData)
+            return convertUsingAVFoundation(from: audioURL)
             #else
             print("❌ Audio conversion is only supported on macOS and iOS")
             return nil
@@ -31,7 +31,7 @@ struct WhisperTranscriptionService {
         
         #if os(macOS) || os(iOS)
         /// Converts audio using AVFoundation framework - unified approach for all formats
-        private static func convertUsingAVFoundation(_ audioData: Data) -> [Float]? {
+        private static func convertUsingAVFoundation(from audioURL: URL) -> [Float]? {
             print("🔄 Converting audio to Whisper format (16kHz mono float)")
             
             // Target format: 16kHz mono float
@@ -41,33 +41,17 @@ struct WhisperTranscriptionService {
                                            channels: 1,
                                            interleaved: false)!
             
-            // Create a temporary file for the input audio
-            let tempInputURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString + ".audio")
-            
-            do {
-                // Write input data to temporary file
-                try audioData.write(to: tempInputURL)
-                
-                defer {
-                    // Clean up temporary file
-                    try? FileManager.default.removeItem(at: tempInputURL)
-                }
-                
-                // Try to create an AVAudioFile from the data
-                guard let audioFile = try? AVAudioFile(forReading: tempInputURL) else {
-                    print("❌ Failed to create AVAudioFile for reading")
-                    return nil
-                }
-                
-                let sourceFormat = audioFile.processingFormat
-                print("🔍 Source format: \(sourceFormat.sampleRate)Hz, \(sourceFormat.channelCount) channels")
-                
-                // Convert the audio file to the required format
-                return convertAudioFile(audioFile, toFormat: outputFormat)
-            } catch {
-                print("❌ Failed during audio file preparation: \(error.localizedDescription)")
+            // Try to create an AVAudioFile from the data
+            guard let audioFile = try? AVAudioFile(forReading: audioURL) else {
+                print("❌ Failed to create AVAudioFile for reading from URL: \(audioURL.path)")
                 return nil
             }
+            
+            let sourceFormat = audioFile.processingFormat
+            print("🔍 Source format: \(sourceFormat.sampleRate)Hz, \(sourceFormat.channelCount) channels")
+            
+            // Convert the audio file to the required format
+            return convertAudioFile(audioFile, toFormat: outputFormat)
         }
         
         /// Converts an audio file to the specified format
@@ -153,7 +137,7 @@ struct WhisperTranscriptionService {
         #endif
     }
 
-    // Разделяемый контекст и блокировка для многопоточного доступа
+    // Shared context and lock for thread-safe access
     private static var sharedContext: OpaquePointer?
     private static let lock = NSLock()
     
@@ -210,7 +194,7 @@ struct WhisperTranscriptionService {
         }
     }
     
-    /// Получает примерное использование памяти (в МБ) для логирования
+    /// Gets approximate memory usage (in MB) for logging
     private static func getMemoryUsage() -> Int {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
@@ -228,24 +212,24 @@ struct WhisperTranscriptionService {
         }
     }
     
-    /// Настраивает постоянный кэш шейдеров Metal
+    /// Configures a persistent Metal shader cache
     private static func setupMetalShaderCache() {
         #if os(macOS) || os(iOS)
-        // Папка для хранения кэша шейдеров Metal
+        // Directory for storing the Metal shader cache
         var cacheDirectory: URL
         
-        // Создаем путь к папке с кэшем в Application Support
+        // Create path to cache folder in Application Support
         if let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             let bundleId = Bundle.main.bundleIdentifier ?? "com.whisperserver"
             let whisperCacheDir = appSupportDir.appendingPathComponent(bundleId).appendingPathComponent("MetalCache")
             
-            // Создаем директорию, если она не существует
+            // Create the directory if it doesn't exist
             do {
                 try FileManager.default.createDirectory(at: whisperCacheDir, withIntermediateDirectories: true)
                 cacheDirectory = whisperCacheDir
                 print("✅ Set Metal shader cache directory: \(whisperCacheDir.path)")
                 
-                // Проверяем существует ли уже кэш
+                // Check if cache already exists
                 let fileManager = FileManager.default
                 let cacheFolderContents = try? fileManager.contentsOfDirectory(at: whisperCacheDir, includingPropertiesForKeys: nil)
                 if let contents = cacheFolderContents, !contents.isEmpty {
@@ -253,16 +237,16 @@ struct WhisperTranscriptionService {
                 }
             } catch {
                 print("⚠️ Failed to create Metal cache directory: \(error.localizedDescription)")
-                // Используем временную директорию как запасной вариант
+                // Use temporary directory as a fallback
                 cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("WhisperMetalCache")
             }
             
-            // Устанавливаем переменные окружения для Metal
+            // Set environment variables for Metal
             setenv("MTL_SHADER_CACHE_PATH", cacheDirectory.path, 1)
             setenv("MTL_SHADER_CACHE", "1", 1)
             setenv("MTL_SHADER_CACHE_SKIP_VALIDATION", "1", 1)
             
-            // Дополнительные настройки для отладки кэширования
+            // Additional settings for cache debugging
             #if DEBUG
             setenv("MTL_DEBUG_SHADER_CACHE", "1", 1)
             #endif
@@ -270,7 +254,7 @@ struct WhisperTranscriptionService {
         #endif
     }
     
-    /// Освобождает ресурсы при завершении работы приложения
+    /// Frees resources on application termination
     static func cleanup() {
         DispatchQueue.main.async {
             inactivityTimer?.invalidate()
@@ -288,21 +272,33 @@ struct WhisperTranscriptionService {
         }
     }
     
-    /// Принудительно освобождает и переинициализирует контекст Whisper при смене модели
+    /// Forcibly releases and reinitializes the Whisper context when the model changes
     static func reinitializeContext() {
-        // Освобождаем текущий контекст, если он существует
-        lock.lock()
-        let memoryBefore = getMemoryUsage()
+        lock.lock(); defer { lock.unlock() }
+
+        // First, free the current context if it exists
         if let ctx = sharedContext {
+            let memoryBefore = getMemoryUsage()
             whisper_free(ctx)
             sharedContext = nil
             let memoryAfter = getMemoryUsage()
             let freed = max(0, memoryBefore - memoryAfter)
             print("🔄 Whisper context released for model change, freed ~\(freed) MB")
-        } else {
-            print("ℹ️ No Whisper context to release for model change")
         }
-        lock.unlock()
+
+        // Immediately try to re-initialize with the currently selected model.
+        // This avoids a "contextless" state and surfaces errors immediately.
+        print("🔄 Attempting to immediately re-initialize context with new model...")
+        let modelManager = ModelManager() // Create a temporary instance to get paths
+        if let newModelPaths = modelManager.getModelPaths() {
+            if getOrCreateContext(modelPaths: newModelPaths) != nil {
+                print("✅ Successfully re-initialized context with model '\(modelManager.selectedModelName ?? "Unknown")'")
+            } else {
+                print("❌ Failed to re-initialize context with new model. It will be created on next request.")
+            }
+        } else {
+            print("⚠️ Could not get new model paths to re-initialize context immediately.")
+        }
         
         // Reset the inactivity timer
         DispatchQueue.main.async {
@@ -310,139 +306,70 @@ struct WhisperTranscriptionService {
             inactivityTimer = nil
         }
         
-        // Контекст будет переинициализирован при следующем вызове transcribeAudioData
-        // или preloadModelForShaderCaching автоматически
+        // The context will be re-initialized on the next call to transcribeAudio
+        // or preloadModelForShaderCaching automatically
         print("✅ Context will be reinitialized on next use with new model")
     }
     
-    /// Выполняет проверку и инициализацию контекста без проведения транскрипции
-    /// - Returns: True если инициализация успешно завершена
+    /// Performs context check and initialization without performing transcription
+    /// - Returns: True if initialization was successful
     static func preloadModelForShaderCaching(modelBinPath: URL? = nil, modelEncoderDir: URL? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        
-        // Если контекст уже существует, просто возвращаем успех
-        if sharedContext != nil {
-            print("✅ Context already initialized, reusing")
-            return true
+
+        // Get model paths either from parameters or from the model manager
+        var finalModelPaths: (binPath: URL, encoderDir: URL)?
+        if let binPath = modelBinPath, let encoderDir = modelEncoderDir {
+            finalModelPaths = (binPath, encoderDir)
+        } else {
+            // Fallback to getting paths from a temporary ModelManager instance
+            print("🔄 Attempting to get paths from ModelManager...")
+            let modelManager = ModelManager()
+            finalModelPaths = modelManager.getModelPaths()
         }
-        
+
+        guard let modelPaths = finalModelPaths else {
+            print("❌ Failed to get model paths for preloading")
+            return false
+        }
+
         print("🔄 Preloading Whisper model for shader caching")
         
-        #if os(macOS) || os(iOS)
-        // Настраиваем постоянный кэш шейдеров Metal
-        setupMetalShaderCache()
-        #endif
-        
-        // Get model paths either from parameters or try to get from AppDelegate
-        var binPath: URL?
-        
-        if let providedBinPath = modelBinPath {
-            // Use directly provided path 
-            binPath = providedBinPath
+        // Use the unified getOrCreateContext method
+        if getOrCreateContext(modelPaths: modelPaths) != nil {
+            print("✅ Preloading successful, context is ready.")
+            return true
         } else {
-            // Fallback to getting from AppDelegate - but now this won't be called from background thread
-            print("🔄 Attempting to get paths from ModelManager via AppDelegate...")
-            DispatchQueue.main.sync {
-                if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
-                    if let modelPaths = appDelegate.modelManager.getPathsForSelectedModel() {
-                        binPath = modelPaths.binPath
-                    }
-                }
-            }
-        }
-        
-        guard let binPath = binPath else {
-            print("❌ Failed to get model bin path")
+            print("❌ Preloading failed.")
             return false
         }
-        
-        print("📂 Using model file at: \(binPath.path)")
-        
-        // Verify file exists and can be accessed
-        let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: binPath.path) {
-            print("❌ Model file doesn't exist at: \(binPath.path)")
-            return false
-        }
-        
-        if !fileManager.isReadableFile(atPath: binPath.path) {
-            print("❌ Model file isn't readable at: \(binPath.path)")
-            return false
-        }
-        
-        var isDirectory: ObjCBool = false
-        if fileManager.fileExists(atPath: binPath.path, isDirectory: &isDirectory) && isDirectory.boolValue {
-            print("❌ Path exists but is a directory, not a file: \(binPath.path)")
-            return false
-        }
-        
-        // Log file size for debugging
-        do {
-            let attributes = try fileManager.attributesOfItem(atPath: binPath.path)
-            if let fileSize = attributes[.size] as? UInt64 {
-                print("📄 File size: \(fileSize) bytes")
-                if fileSize < 1000000 { // At least 1MB for a model file
-                    print("⚠️ Warning: Model file is suspiciously small")
-                }
-            } else {
-                print("📄 File size: unknown")
-            }
-        } catch {
-            print("📄 File size: could not be determined - \(error.localizedDescription)")
-        }
-        
-        // Additional verification: try to read a bit of the file
-        do {
-            let fileHandle = try FileHandle(forReadingFrom: binPath)
-            let header = try fileHandle.read(upToCount: 16)
-            try fileHandle.close()
-            
-            if header == nil || header!.isEmpty {
-                print("❌ Could not read file header - file may be empty or inaccessible")
-                return false
-            }
-            
-            print("✅ Successfully read file header")
-        } catch {
-            print("❌ Error reading file: \(error.localizedDescription)")
-            return false
-        }
-        
-        var contextParams = whisper_context_default_params()
-        #if os(macOS) || os(iOS)
-        contextParams.use_gpu = true
-        contextParams.flash_attn = true
-        
-        // Дополнительные оптимизации для Metal
-        setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
-        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Выделение большего количества памяти для Metal
-        print("🔧 Metal settings: NDIM=128, MEM_MB=1024")
-        #endif
-        
-        print("🔄 Initializing Whisper context with file...")
-        let contextResult = whisper_init_from_file_with_params(binPath.path, contextParams)
-        
-        if contextResult == nil {
-            print("❌ Failed to initialize Whisper context - null result returned")
-            return false
-        }
-        
-        sharedContext = contextResult
-        print("✅ Whisper context initialized successfully")
-        return true
     }
     
-    /// Инициализирует контекст Whisper с явно переданными путями к модели
-    private static func initializeContext(binPath: URL) -> OpaquePointer? {
-        print("🔄 Initializing Whisper context with provided model path")
-        
+    /// Initializes or retrieves the Whisper context. This function MUST be called from within a lock.
+    /// - Parameter modelPaths: The paths to the model files.
+    /// - Returns: An `OpaquePointer` to the Whisper context, or `nil` on failure.
+    private static func getOrCreateContext(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
+        // If context already exists, we're done.
+        if let existingContext = sharedContext {
+            print("✅ Reusing existing Whisper context.")
+            return existingContext
+        }
+
+        // If no context, we must create one. We need model paths.
+        print("🔄 No existing context. Initializing new Whisper context.")
+        guard let paths = modelPaths else {
+            print("❌ Cannot initialize context: Model paths are not provided.")
+            return nil
+        }
+
+        let memoryBefore = getMemoryUsage()
+
         #if os(macOS) || os(iOS)
-        // Настраиваем постоянный кэш шейдеров Metal
         setupMetalShaderCache()
         #endif
-        
+
+        let binPath = paths.binPath
         print("📂 Using model file at: \(binPath.path)")
-        
+
         // Verify file exists and can be accessed
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: binPath.path),
@@ -450,7 +377,7 @@ struct WhisperTranscriptionService {
             print("❌ Model file doesn't exist or isn't readable at: \(binPath.path)")
             return nil
         }
-        
+
         // Log file size for debugging
         do {
             let attributes = try fileManager.attributesOfItem(atPath: binPath.path)
@@ -462,109 +389,60 @@ struct WhisperTranscriptionService {
         } catch {
             print("📄 File size: could not be determined - \(error.localizedDescription)")
         }
-        
+
         var contextParams = whisper_context_default_params()
-        
+
         #if os(macOS) || os(iOS)
         contextParams.use_gpu = true
         contextParams.flash_attn = true
-        
-        // Дополнительные оптимизации для Metal
-        setenv("WHISPER_METAL_NDIM", "128", 1)  // Оптимизация для размера партии
-        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Выделение большего количества памяти для Metal
+        // Additional Metal optimizations
+        setenv("WHISPER_METAL_NDIM", "128", 1)  // Optimization for batch size
+        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Allocate more memory for Metal
         print("🔧 Metal settings: NDIM=128, MEM_MB=1024")
         #endif
-        
-        print("🔄 Initializing Whisper context with file...")
+
+        print("🔄 Initializing Whisper context from file...")
         guard let newContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
-            print("❌ Failed to initialize Whisper context")
+            print("❌ Failed to initialize Whisper context from file.")
             return nil
         }
+
+        sharedContext = newContext
+        let memoryAfter = getMemoryUsage()
+        let used = max(0, memoryAfter - memoryBefore)
+        print("✅ New Whisper context initialized, using ~\(used) MB")
         
-        print("✅ Whisper context initialized successfully")
+        // Send notification that Metal is active
+        DispatchQueue.main.async {
+            let modelName = extractModelNameFromPath(paths.binPath)
+            NotificationCenter.default.post(
+                name: metalActivatedNotificationName,
+                object: nil,
+                userInfo: ["modelName": modelName ?? "Unknown"]
+            )
+        }
+
         return newContext
     }
-    
+
     /// Performs transcription of audio data received from HTTP request and returns the result
     /// - Parameters:
-    ///   - audioData: Binary audio file data
+    ///   - audioURL: URL of the original audio file
     ///   - language: Audio language code (optional, by default determined automatically)
     ///   - prompt: Prompt to improve recognition (optional)
     ///   - modelPaths: Optional model paths to use for initialization if context doesn't exist
     /// - Returns: String with transcription result or nil in case of error
-    static func transcribeAudioData(_ audioData: Data, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> String? {
+    static func transcribeAudio(at audioURL: URL, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> String? {
+        // Lock the entire transcription process to ensure thread safety
+        lock.lock(); defer { lock.unlock() }
+
         // Reset the inactivity timer since we're using Whisper now
         resetInactivityTimer()
         
-        // Extract model name for logging
-        let modelName = extractModelNameFromPath(modelPaths?.binPath)
-        
-        // Получаем или инициализируем контекст
-        let context: OpaquePointer
-        let isNewContext: Bool
-        
-        lock.lock()
-        
-        // Check if we have an existing context
-        if let existingContext = sharedContext {
-            print("✅ Using existing Whisper context for model: \(modelName ?? "Unknown")")
-            context = existingContext
-            isNewContext = false
-            lock.unlock()
-        } else {
-            // We need to initialize a new context
-            print("🔄 Initializing new Whisper context for model: \(modelName ?? "Unknown")")
-            let memoryBefore = getMemoryUsage()
-            
-            // Determine how to get model paths - either use the provided paths or fail
-            if let paths = modelPaths {
-                print("🔄 Using provided model paths for initialization")
-                
-                // Verify that the files exist and are readable
-                let fileManager = FileManager.default
-                if !fileManager.fileExists(atPath: paths.binPath.path) {
-                    lock.unlock()
-                    print("❌ Model bin file does not exist at path: \(paths.binPath.path)")
-                    return nil
-                }
-                
-                if !fileManager.isReadableFile(atPath: paths.binPath.path) {
-                    lock.unlock()
-                    print("❌ Model bin file is not readable at path: \(paths.binPath.path)")
-                    return nil
-                }
-                
-                // Initialize context with the provided bin path
-                guard let newContext = initializeContext(binPath: paths.binPath) else {
-                    lock.unlock()
-                    print("❌ Failed to initialize Whisper context with provided paths")
-                    return nil
-                }
-                
-                sharedContext = newContext
-                context = newContext
-                isNewContext = true
-                
-                let memoryAfter = getMemoryUsage()
-                let used = max(0, memoryAfter - memoryBefore)
-                print("✅ Successfully initialized new Whisper context, using ~\(used) MB")
-                
-                // Отправляем нотификацию о том, что Metal активирован
-                DispatchQueue.main.async {
-                    NotificationCenter.default.post(
-                        name: metalActivatedNotificationName,
-                        object: nil,
-                        userInfo: ["modelName": modelName ?? "Unknown"]
-                    )
-                }
-                
-                lock.unlock()
-            } else {
-                // We don't have model paths and we're in a background thread - cannot proceed
-                lock.unlock()
-                print("❌ No model paths provided and cannot access AppDelegate from background thread")
-                return nil
-            }
+        // Get or initialize context
+        guard let context = getOrCreateContext(modelPaths: modelPaths) else {
+            print("❌ Failed to get or create Whisper context.")
+            return nil
         }
         
         // Configure parameters
@@ -577,24 +455,30 @@ struct WhisperTranscriptionService {
         params.no_context = true
         
         // Set language if specified
+        var lang_cstr: UnsafeMutablePointer<CChar>?
         if let language = language {
-            language.withCString { lang in
-                params.language = lang
-            }
+            lang_cstr = strdup(language)
+        } else {
+            lang_cstr = nil
         }
-        
+        params.language = UnsafePointer(lang_cstr)
+        defer { free(lang_cstr) }
+
         // Set prompt if specified
+        var prompt_cstr: UnsafeMutablePointer<CChar>?
         if let prompt = prompt {
-            prompt.withCString { p in
-                params.initial_prompt = p
-            }
+            prompt_cstr = strdup(prompt)
+        } else {
+            prompt_cstr = nil
         }
+        params.initial_prompt = UnsafePointer(prompt_cstr)
+        defer { free(prompt_cstr) }
         
         // Use available CPU cores efficiently
         params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
         
         // Convert audio to samples for Whisper using the new converter
-        guard let samples = AudioConverter.convertToWhisperFormat(audioData) else {
+        guard let samples = AudioConverter.convertToWhisperFormat(from: audioURL) else {
             print("❌ Failed to convert audio data to Whisper format")
             return nil
         }
@@ -619,6 +503,126 @@ struct WhisperTranscriptionService {
         }
         
         return transcription.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    /// User data structure to pass to whisper.cpp callbacks
+    private class TranscriptionUserData {
+        var onSegment: (String) -> Void
+        var onCompletion: () -> Void
+        var lastSegment: Int = -1
+
+        init(onSegment: @escaping (String) -> Void, onCompletion: @escaping () -> Void) {
+            self.onSegment = onSegment
+            self.onCompletion = onCompletion
+        }
+    }
+
+    /// C-style callback for new segments
+    private static let newSegmentCallback: whisper_new_segment_callback = { (ctx, _, n_new, user_data) in
+        guard let user_data = user_data else { return }
+        let userData = Unmanaged<TranscriptionUserData>.fromOpaque(user_data).takeUnretainedValue()
+        
+        let n_segments = whisper_full_n_segments(ctx)
+        
+        for i in (n_segments - n_new)..<n_segments {
+            // Avoid processing the same segment twice
+            if i > userData.lastSegment {
+                if let text = whisper_full_get_segment_text(ctx, i) {
+                    userData.onSegment(String(cString: text))
+                    userData.lastSegment = Int(i)
+                }
+            }
+        }
+    }
+
+    /// Performs streaming transcription of audio data.
+    /// - Parameters:
+    ///   - audioURL: URL of the original audio file
+    ///   - language: Audio language code.
+    ///   - prompt: Prompt to improve recognition.
+    ///   - modelPaths: Optional model paths.
+    ///   - onSegment: Callback for each new transcribed segment.
+    ///   - onCompletion: Callback for when transcription is complete.
+    /// - Returns: Boolean indicating if transcription started successfully.
+    static func transcribeAudioStream(
+        at audioURL: URL,
+        language: String? = nil,
+        prompt: String? = nil,
+        modelPaths: (binPath: URL, encoderDir: URL)? = nil,
+        onSegment: @escaping (String) -> Void,
+        onCompletion: @escaping () -> Void
+    ) -> Bool {
+        // We cannot lock the whole scope here because whisper_full will be called
+        // on a background thread. The transcription must be queued and executed serially.
+        // For simplicity, we will run the entire streaming transcription inside the lock on a background thread.
+        // This is not ideal for performance but guarantees safety.
+        // A better approach would be an actor or a dedicated serial queue.
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            lock.lock(); defer { lock.unlock() }
+
+            resetInactivityTimer()
+
+            guard let context = getOrCreateContext(modelPaths: modelPaths) else {
+                print("❌ Failed to get or create Whisper context for streaming.")
+                onCompletion()
+                return
+            }
+
+            var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
+            params.print_realtime = false
+            params.print_progress = false
+            params.print_timestamps = false
+            params.print_special = false
+            params.translate = false
+            params.no_context = true
+            params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
+
+            var lang_cstr: UnsafeMutablePointer<CChar>?
+            if let language = language {
+                lang_cstr = strdup(language)
+            } else {
+                lang_cstr = nil
+            }
+            params.language = UnsafePointer(lang_cstr)
+            defer { free(lang_cstr) }
+
+            var prompt_cstr: UnsafeMutablePointer<CChar>?
+            if let prompt = prompt {
+                prompt_cstr = strdup(prompt)
+            } else {
+                prompt_cstr = nil
+            }
+            params.initial_prompt = UnsafePointer(prompt_cstr)
+            defer { free(prompt_cstr) }
+
+            // Setup streaming callback
+            let userData = TranscriptionUserData(onSegment: onSegment, onCompletion: onCompletion)
+            let unmanagedUserData = Unmanaged.passRetained(userData)
+            params.new_segment_callback = newSegmentCallback
+            params.new_segment_callback_user_data = unmanagedUserData.toOpaque()
+
+            guard let samples = AudioConverter.convertToWhisperFormat(from: audioURL) else {
+                print("❌ Failed to convert audio data to Whisper format")
+                unmanagedUserData.release()
+                onCompletion()
+                return
+            }
+
+            // Run transcription
+            samples.withUnsafeBufferPointer { samplesBuffer in
+                let result = whisper_full(context, params, samplesBuffer.baseAddress, Int32(samplesBuffer.count))
+                if result != 0 {
+                    print("❌ Error during streaming transcription execution")
+                }
+                // Call completion handler
+                userData.onCompletion()
+            }
+            // Release user data after transcription is complete
+            unmanagedUserData.release()
+        }
+        
+        return true
     }
     
     /// Extracts model name from URL path for better logging
