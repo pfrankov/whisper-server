@@ -15,10 +15,11 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}🔧 WhisperServer API Test Suite${NC}"
-echo -e "${BLUE}Testing OpenAI Whisper API compatibility${NC}"
+echo -e "${BLUE}Testing OpenAI Whisper API compatibility + SSE Streaming${NC}"
 echo ""
 
 # Check if test audio file exists
@@ -66,6 +67,52 @@ run_test() {
     echo ""
 }
 
+# SSE Test function
+run_sse_test() {
+    local test_name="$1"
+    local format="$2"
+    local accept_header="$3"
+    local expected_content_type="$4"
+    local validation_check="$5"
+    
+    echo -e "${PURPLE}🌊 Testing SSE: $test_name${NC}"
+    
+    # Get headers and response
+    temp_file=$(mktemp)
+    response=$(curl -s -D "$temp_file" -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -H "Accept: $accept_header" \
+        -F file=@$TEST_AUDIO \
+        -F response_format="$format" \
+        -F stream="true" \
+        --no-buffer 2>/dev/null)
+    
+    headers=$(cat "$temp_file")
+    rm "$temp_file"
+    
+    # Check content type
+    content_type=$(echo "$headers" | grep -i "content-type:" | head -1 | tr -d '\r')
+    
+    if [[ "$content_type" == *"$expected_content_type"* ]]; then
+        echo -e "${GREEN}✅ Content-Type correct: $content_type${NC}"
+        
+        # Validate response content
+        if eval "$validation_check"; then
+            echo -e "${GREEN}✅ PASS: $test_name${NC}"
+            echo -e "${YELLOW}   Sample output (first 3 lines):${NC}"
+            echo "$response" | head -3 | sed 's/^/   /'
+        else
+            echo -e "${RED}❌ FAIL: $test_name - Response validation failed${NC}"
+            echo -e "${RED}Response: $response${NC}"
+        fi
+    else
+        echo -e "${RED}❌ FAIL: $test_name - Wrong Content-Type${NC}"
+        echo -e "${RED}Expected: $expected_content_type, Got: $content_type${NC}"
+    fi
+    echo ""
+}
+
+echo -e "${BLUE}=== BASIC API TESTS ===${NC}"
+
 # Test 1: JSON Response Format (Default)
 run_test "JSON Response Format" \
     "curl -s -X POST '$SERVER_URL/v1/audio/transcriptions' -F file=@$TEST_AUDIO" \
@@ -100,6 +147,8 @@ run_test "Missing File Parameter" \
 run_test "Invalid Response Format" \
     "curl -s -X POST '$SERVER_URL/v1/audio/transcriptions' -F file=@$TEST_AUDIO -F response_format=invalid" \
     '[[ ${#response} -gt 0 ]]'  # Should return something, even if error
+
+echo -e "${BLUE}=== SUBTITLE FORMATS TESTS ===${NC}"
 
 # Test 8: SRT Subtitles Format
 echo -e "${BLUE}📺 Testing SRT Subtitles Format${NC}"
@@ -169,8 +218,10 @@ else
     echo -e "${YELLOW}   Response: $verbose_response${NC}"
 fi
 
-# Test 11: Test SRT Streaming
-echo -e "${BLUE}🌊 Testing SRT Streaming${NC}"
+echo -e "${BLUE}=== CHUNKED STREAMING TESTS ===${NC}"
+
+# Test 11: Test SRT Streaming (Chunked)
+echo -e "${BLUE}🌊 Testing SRT Streaming (Chunked)${NC}"
 stream_srt_response=$(curl -s -X POST "$SERVER_URL/v1/audio/transcriptions" \
   -F file=@$TEST_AUDIO \
   -F response_format=srt \
@@ -186,7 +237,7 @@ else
     echo -e "${YELLOW}   Response: $stream_srt_response${NC}"
 fi
 
-echo -e "${BLUE}🌊 Testing VTT Streaming${NC}"
+echo -e "${BLUE}🌊 Testing VTT Streaming (Chunked)${NC}"
 stream_vtt_response=$(curl -s -X POST "$SERVER_URL/v1/audio/transcriptions" \
   -F file=@$TEST_AUDIO \
   -F response_format=vtt \
@@ -202,7 +253,55 @@ else
     echo -e "${YELLOW}   Response: $stream_vtt_response${NC}"
 fi
 
-# Test 12: Performance Test
+echo -e "${BLUE}=== SSE STREAMING TESTS ===${NC}"
+
+# Test 12: SSE Text Streaming
+run_sse_test "SSE Text Streaming" "text" "text/event-stream" "text/event-stream" \
+    '[[ "$response" == *"data:"* && ${#response} -gt 0 ]]'
+
+# Test 13: SSE JSON Streaming
+run_sse_test "SSE JSON Streaming" "json" "text/event-stream" "text/event-stream" \
+    '[[ "$response" == *"data:"* && "$response" == *"text"* ]]'
+
+# Test 14: SSE SRT Streaming
+run_sse_test "SSE SRT Streaming" "srt" "text/event-stream" "text/event-stream" \
+    '[[ "$response" == *"data:"* && "$response" == *"-->"* ]]'
+
+# Test 15: SSE VTT Streaming
+run_sse_test "SSE VTT Streaming" "vtt" "text/event-stream" "text/event-stream" \
+    '[[ "$response" == *"data:"* && "$response" == *"WEBVTT"* ]]'
+
+# Test 16: SSE Verbose JSON Streaming
+run_sse_test "SSE Verbose JSON Streaming" "verbose_json" "text/event-stream" "text/event-stream" \
+    '[[ "$response" == *"data:"* && "$response" == *"start"* ]]'
+
+echo -e "${BLUE}=== FALLBACK TESTS ===${NC}"
+
+# Test 17: Chunked Fallback (no SSE support)
+echo -e "${PURPLE}🔄 Testing Chunked Fallback (Accept: application/json)${NC}"
+fallback_response=$(curl -s -D /tmp/fallback_headers -X POST "$SERVER_URL/v1/audio/transcriptions" \
+    -H "Accept: application/json" \
+    -F file=@$TEST_AUDIO \
+    -F response_format="text" \
+    -F stream="true" \
+    --no-buffer 2>/dev/null)
+
+fallback_headers=$(cat /tmp/fallback_headers 2>/dev/null || echo "")
+rm -f /tmp/fallback_headers
+
+if [[ "$fallback_headers" == *"text/plain"* ]] && [[ "$fallback_headers" != *"text/event-stream"* ]]; then
+    echo -e "${GREEN}✅ Chunked fallback works correctly${NC}"
+    echo -e "${YELLOW}   Content-Type: text/plain (not SSE)${NC}"
+    echo -e "${YELLOW}   Sample output: ${fallback_response:0:50}...${NC}"
+else
+    echo -e "${RED}❌ Chunked fallback failed${NC}"
+    echo -e "${RED}Headers: $fallback_headers${NC}"
+fi
+echo ""
+
+echo -e "${BLUE}=== PERFORMANCE & HEADERS TESTS ===${NC}"
+
+# Test 18: Performance Test
 echo -e "${BLUE}🚀 Performance Test${NC}"
 echo -e "${YELLOW}Measuring response time...${NC}"
 start_time=$(date +%s.%N)
@@ -218,7 +317,7 @@ else
 fi
 echo ""
 
-# Test 13: Check Content-Type Headers
+# Test 19: Check Content-Type Headers
 echo -e "${BLUE}🔍 Testing HTTP Headers${NC}"
 
 # JSON Content-Type
@@ -239,21 +338,26 @@ fi
 
 echo ""
 echo -e "${BLUE}🏁 Test Suite Complete!${NC}"
-echo -e "${GREEN}🎉 WhisperServer now supports all OpenAI Whisper API formats with FULL STREAMING!${NC}"
+echo -e "${GREEN}🎉 WhisperServer supports OpenAI Whisper API + SSE Streaming!${NC}"
 echo ""
-echo -e "${YELLOW}📺 NEW: Subtitle formats available (both streaming and non-streaming):${NC}"
+echo -e "${YELLOW}📺 Subtitle formats available (both streaming and non-streaming):${NC}"
 echo -e "   ${GREEN}SRT:${NC}   curl -F file=@audio.wav -F response_format=srt $SERVER_URL/v1/audio/transcriptions"
 echo -e "   ${GREEN}VTT:${NC}   curl -F file=@audio.wav -F response_format=vtt $SERVER_URL/v1/audio/transcriptions"
 echo -e "   ${GREEN}Verbose JSON:${NC} curl -F file=@audio.wav -F response_format=verbose_json $SERVER_URL/v1/audio/transcriptions"
 echo ""
-echo -e "${YELLOW}🌊 STREAMING support for ALL formats:${NC}"
-echo -e "   ${GREEN}SRT Streaming:${NC} curl -F file=@audio.wav -F response_format=srt -F stream=true $SERVER_URL/v1/audio/transcriptions"
-echo -e "   ${GREEN}VTT Streaming:${NC} curl -F file=@audio.wav -F response_format=vtt -F stream=true $SERVER_URL/v1/audio/transcriptions"
+echo -e "${YELLOW}🌊 SSE STREAMING support for ALL formats:${NC}"
+echo -e "   ${GREEN}SSE Text:${NC} curl -H 'Accept: text/event-stream' -F file=@audio.wav -F response_format=text -F stream=true $SERVER_URL/v1/audio/transcriptions"
+echo -e "   ${GREEN}SSE JSON:${NC} curl -H 'Accept: text/event-stream' -F file=@audio.wav -F response_format=json -F stream=true $SERVER_URL/v1/audio/transcriptions"
+echo -e "   ${GREEN}SSE SRT:${NC}  curl -H 'Accept: text/event-stream' -F file=@audio.wav -F response_format=srt -F stream=true $SERVER_URL/v1/audio/transcriptions"
 echo ""
-echo -e "${YELLOW}💡 This comprehensive curl test suite covers ALL functionality:${NC}"
+echo -e "${YELLOW}🔄 CHUNKED FALLBACK (automatic when SSE not supported):${NC}"
+echo -e "   ${GREEN}Chunked:${NC} curl -H 'Accept: application/json' -F file=@audio.wav -F response_format=text -F stream=true $SERVER_URL/v1/audio/transcriptions"
+echo ""
+echo -e "${YELLOW}💡 This comprehensive test suite covers:${NC}"
 echo "   - OpenAI Whisper API compatibility"
 echo "   - All response formats (json, text, srt, vtt, verbose_json)"
-echo "   - Streaming support for all formats"
+echo "   - SSE streaming with proper headers"
+echo "   - Chunked response fallback"
 echo "   - Error handling and performance testing"
 echo ""
 echo -e "${YELLOW}📝 OpenAI Whisper API Reference:${NC}"

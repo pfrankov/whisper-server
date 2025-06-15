@@ -16,6 +16,7 @@ WhisperServer is a macOS application that runs in the background with only a men
 - Provides an API compatible with the OpenAI Whisper API
 - Supports the `/v1/audio/transcriptions` endpoint for audio transcription
 - HTTP server on port 12017
+- **Streaming support with Server-Sent Events (SSE) and chunked response fallback**
 - Also returns "OK" in response to any other HTTP request
 
 ## How to Use
@@ -42,6 +43,7 @@ Supported parameters:
 - `response_format` - response format (json, text, srt, vtt, verbose_json)
 - `temperature` - sampling temperature from 0 to 1
 - `language` - input language (ISO-639-1)
+- `stream` - enable streaming response (true/false)
 
 ## Response Formats
 
@@ -84,6 +86,50 @@ The server supports the following response formats:
 4. **srt**: SubRip subtitle format
 
 5. **vtt**: WebVTT subtitle format
+
+## Streaming Support
+
+WhisperServer supports real-time streaming transcription with automatic protocol detection:
+
+### Server-Sent Events (SSE) - Priority
+When the client sends `Accept: text/event-stream` header, the server uses SSE format:
+
+```bash
+curl -X POST http://localhost:12017/v1/audio/transcriptions \
+  -H "Accept: text/event-stream" \
+  -F file=@audio.wav \
+  -F response_format="text" \
+  -F stream="true" \
+  --no-buffer
+```
+
+Response format:
+```
+data: First transcribed segment
+data: 
+
+data: Second transcribed segment
+data: 
+
+event: end
+data: 
+
+```
+
+### Chunked Response - Fallback
+When SSE is not supported, the server automatically falls back to HTTP chunked transfer encoding:
+
+```bash
+curl -X POST http://localhost:12017/v1/audio/transcriptions \
+  -F file=@audio.wav \
+  -F response_format="text" \
+  -F stream="true" \
+  --no-buffer
+```
+
+### Testing Streaming
+Use the comprehensive test script:
+- `test_api.sh` - Complete API and streaming test suite
 
 ## Technical Details
 

@@ -70,6 +70,25 @@ final class VaporServer {
         print("🛑 Vapor server stopped")
     }
     
+    // MARK: - Private Methods
+    
+    /// Checks if the client supports Server-Sent Events
+    /// - Parameter request: The incoming HTTP request
+    /// - Returns: True if SSE is supported, false otherwise
+    private func supportsSSE(_ request: Request) -> Bool {
+        guard let acceptHeader = request.headers.first(name: .accept) else { return false }
+        return acceptHeader.contains("text/event-stream")
+    }
+    
+    /// Formats data for SSE transmission
+    /// - Parameter data: The data to format
+    /// - Returns: SSE-formatted string
+    private func formatSSEData(_ data: String) -> String {
+        let lines = data.components(separatedBy: .newlines)
+        let formattedLines = lines.map { "data: \($0)" }.joined(separator: "\n")
+        return "\(formattedLines)\n\n"
+    }
+    
     // MARK: - Routes
     
     private func routes(_ app: Application) throws {
@@ -104,6 +123,9 @@ final class VaporServer {
             }
             
             if whisperReq.stream == true {
+                // Check if client supports SSE
+                let useSSE = self.supportsSSE(req)
+                
                 // Choose the appropriate streaming method based on format
                 if responseFormat == "srt" || responseFormat == "vtt" || responseFormat == "verbose_json" {
                     // Use timestamp streaming for subtitle formats
@@ -152,13 +174,23 @@ final class VaporServer {
                                     default:
                                         output = segment.text
                                     }
-                                    var buffer = req.byteBufferAllocator.buffer(capacity: output.utf8.count)
-                                    buffer.writeString(output)
+                                    
+                                    // Format output based on streaming method
+                                    let finalOutput = useSSE ? self.formatSSEData(output) : output
+                                    var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
+                                    buffer.writeString(finalOutput)
                                     streamWriter.write(.buffer(buffer), promise: nil)
                                 }
                             },
                             onCompletion: {
                                 req.eventLoop.execute {
+                                    if useSSE {
+                                        // Send SSE end event
+                                        let endEvent = "event: end\ndata: \n\n"
+                                        var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
+                                        buffer.writeString(endEvent)
+                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                    }
                                     streamWriter.write(.end, promise: nil)
                                     try? FileManager.default.removeItem(at: tempFileURL) // Clean up
                                 }
@@ -172,9 +204,16 @@ final class VaporServer {
                         }
                     })
                     var headers = HTTPHeaders()
-                    let contentType = responseFormat == "srt" ? "application/x-subrip" : 
-                                     responseFormat == "vtt" ? "text/vtt" : "application/json"
-                    headers.add(name: "Content-Type", value: contentType)
+                    if useSSE {
+                        headers.add(name: "Content-Type", value: "text/event-stream")
+                        headers.add(name: "Cache-Control", value: "no-cache")
+                        headers.add(name: "Connection", value: "keep-alive")
+                        headers.add(name: "Access-Control-Allow-Origin", value: "*")
+                    } else {
+                        let contentType = responseFormat == "srt" ? "application/x-subrip" : 
+                                         responseFormat == "vtt" ? "text/vtt" : "application/json"
+                        headers.add(name: "Content-Type", value: contentType)
+                    }
                     return Response(status: .ok, headers: headers, body: body)
                 } else {
                     // Use regular streaming for simple formats (json, text)
@@ -199,13 +238,23 @@ final class VaporServer {
                                     default: // text
                                         output = segment
                                     }
-                                    var buffer = req.byteBufferAllocator.buffer(capacity: output.utf8.count)
-                                    buffer.writeString(output)
+                                    
+                                    // Format output based on streaming method
+                                    let finalOutput = useSSE ? self.formatSSEData(output) : output
+                                    var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
+                                    buffer.writeString(finalOutput)
                                     streamWriter.write(.buffer(buffer), promise: nil)
                                 }
                             },
                             onCompletion: {
                                 req.eventLoop.execute {
+                                    if useSSE {
+                                        // Send SSE end event
+                                        let endEvent = "event: end\ndata: \n\n"
+                                        var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
+                                        buffer.writeString(endEvent)
+                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                    }
                                     streamWriter.write(.end, promise: nil)
                                     try? FileManager.default.removeItem(at: tempFileURL) // Clean up
                                 }
@@ -219,7 +268,14 @@ final class VaporServer {
                         }
                     })
                     var headers = HTTPHeaders()
-                    headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
+                    if useSSE {
+                        headers.add(name: "Content-Type", value: "text/event-stream")
+                        headers.add(name: "Cache-Control", value: "no-cache")
+                        headers.add(name: "Connection", value: "keep-alive")
+                        headers.add(name: "Access-Control-Allow-Origin", value: "*")
+                    } else {
+                        headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
+                    }
                     return Response(status: .ok, headers: headers, body: body)
                 }
             } else {
@@ -288,4 +344,4 @@ final class VaporServer {
             }
         }
     }
-} 
+}
