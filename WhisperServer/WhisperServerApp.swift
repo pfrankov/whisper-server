@@ -57,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A flag indicating whether the server is currently starting up
     private var isStartingServer: Bool = false
     
+    /// Track which model we've updated UI for to prevent duplicate logs
+    private var lastUIUpdatedModelID: String? = nil
+    
     // MARK: - Application Lifecycle
     
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -194,6 +197,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateUIForModelPreparation() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            
+            // Prevent duplicate UI updates for the same model
+            let currentModelID = self.modelManager.selectedModelID
+            if currentModelID == self.lastUIUpdatedModelID {
+                return // Skip duplicate update
+            }
+            
+            self.lastUIUpdatedModelID = currentModelID
             
             // Сбрасываем статус Metal на "неактивно" при смене модели
             let selectedModel = self.modelManager.selectedModelName ?? "Unknown"

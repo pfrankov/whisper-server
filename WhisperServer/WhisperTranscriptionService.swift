@@ -13,6 +13,114 @@ struct WhisperTranscriptionService {
     /// Notification name for when Metal is activated
     static let metalActivatedNotificationName = NSNotification.Name("WhisperMetalActivated")
     
+    // MARK: - Subtitle Data Structures
+    
+    /// Represents a segment of transcription with timing information
+    struct TranscriptionSegment {
+        let startTime: Double    // Start time in seconds
+        let endTime: Double      // End time in seconds
+        let text: String         // Transcribed text
+    }
+    
+    /// Response formats for transcription
+    enum ResponseFormat: String, CaseIterable {
+        case json = "json"
+        case text = "text"
+        case verboseJson = "verbose_json"
+        case srt = "srt"
+        case vtt = "vtt"
+    }
+    
+    // MARK: - Subtitle Formatting Functions
+    
+    /// Formats timestamps for SRT format (HH:MM:SS,mmm)
+    static func formatSRTTimestamp(_ seconds: Double) -> String {
+        let hours = Int(seconds / 3600)
+        let minutes = Int((seconds.truncatingRemainder(dividingBy: 3600)) / 60)
+        let secs = Int(seconds.truncatingRemainder(dividingBy: 60))
+        let milliseconds = Int((seconds.truncatingRemainder(dividingBy: 1)) * 1000)
+        
+        return String(format: "%02d:%02d:%02d,%03d", hours, minutes, secs, milliseconds)
+    }
+    
+    /// Formats timestamps for VTT format (HH:MM:SS.mmm)
+    static func formatVTTTimestamp(_ seconds: Double) -> String {
+        let hours = Int(seconds / 3600)
+        let minutes = Int((seconds.truncatingRemainder(dividingBy: 3600)) / 60)
+        let secs = Int(seconds.truncatingRemainder(dividingBy: 60))
+        let milliseconds = Int((seconds.truncatingRemainder(dividingBy: 1)) * 1000)
+        
+        return String(format: "%02d:%02d:%02d.%03d", hours, minutes, secs, milliseconds)
+    }
+    
+    /// Formats segments as SRT subtitles
+    static func formatAsSRT(segments: [TranscriptionSegment]) -> String {
+        var srtString = ""
+        
+        for (index, segment) in segments.enumerated() {
+            let startTime = formatSRTTimestamp(segment.startTime)
+            let endTime = formatSRTTimestamp(segment.endTime)
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            // Skip empty segments
+            if !text.isEmpty {
+                srtString += "\(index + 1)\n"
+                srtString += "\(startTime) --> \(endTime)\n"
+                srtString += "\(text)\n\n"
+            }
+        }
+        
+        return srtString
+    }
+    
+    /// Formats segments as WebVTT subtitles
+    static func formatAsVTT(segments: [TranscriptionSegment]) -> String {
+        var vttString = "WEBVTT\n\n"
+        
+        for segment in segments {
+            let startTime = formatVTTTimestamp(segment.startTime)
+            let endTime = formatVTTTimestamp(segment.endTime)
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            // Skip empty segments
+            if !text.isEmpty {
+                vttString += "\(startTime) --> \(endTime)\n"
+                vttString += "\(text)\n\n"
+            }
+        }
+        
+        return vttString
+    }
+    
+    /// Formats segments as verbose JSON (OpenAI Whisper API compatible)
+    static func formatAsVerboseJSON(segments: [TranscriptionSegment]) -> String {
+        let fullTranscription = segments.map { $0.text }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        let segmentDicts = segments.compactMap { segment -> [String: Any]? in
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.isEmpty { return nil }
+            
+            return [
+                "start": segment.startTime,
+                "end": segment.endTime,
+                "text": text
+            ]
+        }
+        
+        let responseDict: [String: Any] = [
+            "text": fullTranscription,
+            "segments": segmentDicts
+        ]
+        
+        if let jsonData = try? JSONSerialization.data(withJSONObject: responseDict, options: .prettyPrinted),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            return jsonString
+        } else {
+            // Fallback to simple JSON
+            return "{\"text\": \"\(fullTranscription)\", \"error\": \"Failed to format verbose JSON\"}"
+        }
+    }
+    
     // MARK: - Audio Conversion
     
     /// Handles conversion of various audio formats to 16-bit, 16kHz mono WAV required by Whisper
@@ -505,6 +613,95 @@ struct WhisperTranscriptionService {
         return transcription.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
+    /// Performs transcription of audio data and returns segments with timestamps for subtitle formats
+    /// - Parameters:
+    ///   - audioURL: URL of the original audio file
+    ///   - language: Audio language code (optional, by default determined automatically)
+    ///   - prompt: Prompt to improve recognition (optional)
+    ///   - modelPaths: Optional model paths to use for initialization if context doesn't exist
+    /// - Returns: Array of TranscriptionSegment with timestamps or nil in case of error
+    static func transcribeAudioWithTimestamps(at audioURL: URL, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> [TranscriptionSegment]? {
+        // Lock the entire transcription process to ensure thread safety
+        lock.lock(); defer { lock.unlock() }
+
+        // Reset the inactivity timer since we're using Whisper now
+        resetInactivityTimer()
+        
+        // Get or initialize context
+        guard let context = getOrCreateContext(modelPaths: modelPaths) else {
+            print("❌ Failed to get or create Whisper context.")
+            return nil
+        }
+        
+        // Configure parameters with timestamps enabled
+        var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
+        params.print_realtime = false
+        params.print_progress = false
+        params.print_timestamps = true  // Enable timestamps for subtitles
+        params.print_special = false
+        params.translate = false
+        params.no_context = true
+        
+        // Set language if specified
+        var lang_cstr: UnsafeMutablePointer<CChar>?
+        if let language = language {
+            lang_cstr = strdup(language)
+        } else {
+            lang_cstr = nil
+        }
+        params.language = UnsafePointer(lang_cstr)
+        defer { free(lang_cstr) }
+
+        // Set prompt if specified
+        var prompt_cstr: UnsafeMutablePointer<CChar>?
+        if let prompt = prompt {
+            prompt_cstr = strdup(prompt)
+        } else {
+            prompt_cstr = nil
+        }
+        params.initial_prompt = UnsafePointer(prompt_cstr)
+        defer { free(prompt_cstr) }
+        
+        // Use available CPU cores efficiently
+        params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
+        
+        // Convert audio to samples for Whisper using the new converter
+        guard let samples = AudioConverter.convertToWhisperFormat(from: audioURL) else {
+            print("❌ Failed to convert audio data to Whisper format")
+            return nil
+        }
+        
+        // Start transcription
+        var result: Int32 = -1
+        samples.withUnsafeBufferPointer { samples in
+            result = whisper_full(context, params, samples.baseAddress, Int32(samples.count))
+        }
+        
+        if result != 0 {
+            print("❌ Error during transcription execution")
+            return nil
+        }
+        
+        // Collect segments with timestamps
+        let numSegments = whisper_full_n_segments(context)
+        var segments: [TranscriptionSegment] = []
+        
+        for i in 0..<numSegments {
+            let text = String(cString: whisper_full_get_segment_text(context, i))
+            let startTime = Double(whisper_full_get_segment_t0(context, i)) / 100.0  // Convert to seconds
+            let endTime = Double(whisper_full_get_segment_t1(context, i)) / 100.0    // Convert to seconds
+            
+            let segment = TranscriptionSegment(
+                startTime: startTime,
+                endTime: endTime,
+                text: text
+            )
+            segments.append(segment)
+        }
+        
+        return segments
+    }
+    
     /// User data structure to pass to whisper.cpp callbacks
     private class TranscriptionUserData {
         var onSegment: (String) -> Void
@@ -512,6 +709,18 @@ struct WhisperTranscriptionService {
         var lastSegment: Int = -1
 
         init(onSegment: @escaping (String) -> Void, onCompletion: @escaping () -> Void) {
+            self.onSegment = onSegment
+            self.onCompletion = onCompletion
+        }
+    }
+    
+    /// User data structure for streaming with timestamps (for subtitle formats)
+    private class TranscriptionUserDataWithTimestamps {
+        var onSegment: (TranscriptionSegment) -> Void
+        var onCompletion: () -> Void
+        var lastSegment: Int = -1
+
+        init(onSegment: @escaping (TranscriptionSegment) -> Void, onCompletion: @escaping () -> Void) {
             self.onSegment = onSegment
             self.onCompletion = onCompletion
         }
@@ -529,6 +738,32 @@ struct WhisperTranscriptionService {
             if i > userData.lastSegment {
                 if let text = whisper_full_get_segment_text(ctx, i) {
                     userData.onSegment(String(cString: text))
+                    userData.lastSegment = Int(i)
+                }
+            }
+        }
+    }
+    
+    /// C-style callback for new segments with timestamps
+    private static let newSegmentWithTimestampsCallback: whisper_new_segment_callback = { (ctx, _, n_new, user_data) in
+        guard let user_data = user_data else { return }
+        let userData = Unmanaged<TranscriptionUserDataWithTimestamps>.fromOpaque(user_data).takeUnretainedValue()
+        
+        let n_segments = whisper_full_n_segments(ctx)
+        
+        for i in (n_segments - n_new)..<n_segments {
+            // Avoid processing the same segment twice
+            if i > userData.lastSegment {
+                if let text = whisper_full_get_segment_text(ctx, i) {
+                    let startTime = Double(whisper_full_get_segment_t0(ctx, i)) / 100.0
+                    let endTime = Double(whisper_full_get_segment_t1(ctx, i)) / 100.0
+                    
+                    let segment = TranscriptionSegment(
+                        startTime: startTime,
+                        endTime: endTime,
+                        text: String(cString: text)
+                    )
+                    userData.onSegment(segment)
                     userData.lastSegment = Int(i)
                 }
             }
@@ -614,6 +849,90 @@ struct WhisperTranscriptionService {
                 let result = whisper_full(context, params, samplesBuffer.baseAddress, Int32(samplesBuffer.count))
                 if result != 0 {
                     print("❌ Error during streaming transcription execution")
+                }
+                // Call completion handler
+                userData.onCompletion()
+            }
+            // Release user data after transcription is complete
+            unmanagedUserData.release()
+        }
+        
+        return true
+    }
+    
+    /// Performs streaming transcription with timestamps for subtitle formats
+    /// - Parameters:
+    ///   - audioURL: URL of the original audio file
+    ///   - language: Audio language code.
+    ///   - prompt: Prompt to improve recognition.
+    ///   - modelPaths: Optional model paths.
+    ///   - onSegment: Callback for each new transcribed segment with timestamps.
+    ///   - onCompletion: Callback for when transcription is complete.
+    /// - Returns: Boolean indicating if transcription started successfully.
+    static func transcribeAudioStreamWithTimestamps(
+        at audioURL: URL,
+        language: String? = nil,
+        prompt: String? = nil,
+        modelPaths: (binPath: URL, encoderDir: URL)? = nil,
+        onSegment: @escaping (TranscriptionSegment) -> Void,
+        onCompletion: @escaping () -> Void
+    ) -> Bool {
+        DispatchQueue.global(qos: .userInitiated).async {
+            lock.lock(); defer { lock.unlock() }
+
+            resetInactivityTimer()
+
+            guard let context = getOrCreateContext(modelPaths: modelPaths) else {
+                print("❌ Failed to get or create Whisper context for timestamp streaming.")
+                onCompletion()
+                return
+            }
+
+            var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
+            params.print_realtime = false
+            params.print_progress = false
+            params.print_timestamps = true  // Enable timestamps for subtitles
+            params.print_special = false
+            params.translate = false
+            params.no_context = true
+            params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
+
+            var lang_cstr: UnsafeMutablePointer<CChar>?
+            if let language = language {
+                lang_cstr = strdup(language)
+            } else {
+                lang_cstr = nil
+            }
+            params.language = UnsafePointer(lang_cstr)
+            defer { free(lang_cstr) }
+
+            var prompt_cstr: UnsafeMutablePointer<CChar>?
+            if let prompt = prompt {
+                prompt_cstr = strdup(prompt)
+            } else {
+                prompt_cstr = nil
+            }
+            params.initial_prompt = UnsafePointer(prompt_cstr)
+            defer { free(prompt_cstr) }
+
+            // Setup streaming callback with timestamps
+            let userData = TranscriptionUserDataWithTimestamps(onSegment: onSegment, onCompletion: onCompletion)
+            let unmanagedUserData = Unmanaged.passRetained(userData)
+            params.new_segment_callback = newSegmentWithTimestampsCallback
+            params.new_segment_callback_user_data = unmanagedUserData.toOpaque()
+
+            guard let samples = AudioConverter.convertToWhisperFormat(from: audioURL) else {
+                print("❌ Failed to convert audio data to Whisper format")
+                unmanagedUserData.release()
+                onCompletion()
+                return
+            }
+
+            // Run transcription
+            samples.withUnsafeBufferPointer { samplesBuffer in
+                let result = whisper_full(context, params, samplesBuffer.baseAddress, Int32(samplesBuffer.count))
+                if result != 0 {
+                    print("❌ Error during timestamp streaming transcription execution")
                 }
                 // Call completion handler
                 userData.onCompletion()

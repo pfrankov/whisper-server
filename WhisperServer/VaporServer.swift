@@ -104,85 +104,187 @@ final class VaporServer {
             }
             
             if whisperReq.stream == true {
-                let body = Response.Body(stream: { streamWriter in
-                    let success = WhisperTranscriptionService.transcribeAudioStream(
-                        at: tempFileURL,
-                        language: whisperReq.language,
-                        prompt: whisperReq.prompt,
-                        modelPaths: modelPaths,
-                        onSegment: { segment in
-                            req.eventLoop.execute {
-                                let output: String
-                                switch responseFormat {
-                                case "json", "verbose_json":
-                                    let jsonSegment = ["text": segment]
-                                    if let jsonData = try? JSONSerialization.data(withJSONObject: jsonSegment),
-                                       let jsonString = String(data: jsonData, encoding: .utf8) {
-                                        output = jsonString + "\n"
-                                    } else {
-                                        output = ""
+                // Choose the appropriate streaming method based on format
+                if responseFormat == "srt" || responseFormat == "vtt" || responseFormat == "verbose_json" {
+                    // Use timestamp streaming for subtitle formats
+                    var segmentCounter = 0
+                    let body = Response.Body(stream: { streamWriter in
+                        let success = WhisperTranscriptionService.transcribeAudioStreamWithTimestamps(
+                            at: tempFileURL,
+                            language: whisperReq.language,
+                            prompt: whisperReq.prompt,
+                            modelPaths: modelPaths,
+                            onSegment: { segment in
+                                req.eventLoop.execute {
+                                    segmentCounter += 1
+                                    let output: String
+                                    switch responseFormat {
+                                    case "srt":
+                                        let startTime = WhisperTranscriptionService.formatSRTTimestamp(segment.startTime)
+                                        let endTime = WhisperTranscriptionService.formatSRTTimestamp(segment.endTime)
+                                        let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        output = "\(segmentCounter)\n\(startTime) --> \(endTime)\n\(text)\n\n"
+                                    case "vtt":
+                                        if segmentCounter == 1 {
+                                            // Add VTT header only for first segment
+                                            let startTime = WhisperTranscriptionService.formatVTTTimestamp(segment.startTime)
+                                            let endTime = WhisperTranscriptionService.formatVTTTimestamp(segment.endTime)
+                                            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                            output = "WEBVTT\n\n\(startTime) --> \(endTime)\n\(text)\n\n"
+                                        } else {
+                                            let startTime = WhisperTranscriptionService.formatVTTTimestamp(segment.startTime)
+                                            let endTime = WhisperTranscriptionService.formatVTTTimestamp(segment.endTime)
+                                            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                            output = "\(startTime) --> \(endTime)\n\(text)\n\n"
+                                        }
+                                    case "verbose_json":
+                                        let segmentDict: [String: Any] = [
+                                            "start": segment.startTime,
+                                            "end": segment.endTime,
+                                            "text": segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        ]
+                                        if let jsonData = try? JSONSerialization.data(withJSONObject: segmentDict),
+                                           let jsonString = String(data: jsonData, encoding: .utf8) {
+                                            output = jsonString + "\n"
+                                        } else {
+                                            output = ""
+                                        }
+                                    default:
+                                        output = segment.text
                                     }
-                                default: // text, srt, vtt
-                                    output = segment
+                                    var buffer = req.byteBufferAllocator.buffer(capacity: output.utf8.count)
+                                    buffer.writeString(output)
+                                    streamWriter.write(.buffer(buffer), promise: nil)
                                 }
-                                var buffer = req.byteBufferAllocator.buffer(capacity: output.utf8.count)
-                                buffer.writeString(output)
-                                streamWriter.write(.buffer(buffer), promise: nil)
+                            },
+                            onCompletion: {
+                                req.eventLoop.execute {
+                                    streamWriter.write(.end, promise: nil)
+                                    try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                                }
                             }
-                        },
-                        onCompletion: {
+                        )
+                        if !success {
                             req.eventLoop.execute {
                                 streamWriter.write(.end, promise: nil)
                                 try? FileManager.default.removeItem(at: tempFileURL) // Clean up
                             }
                         }
-                    )
-                    if !success {
-                        req.eventLoop.execute {
-                            streamWriter.write(.end, promise: nil)
-                            try? FileManager.default.removeItem(at: tempFileURL) // Clean up
-                        }
-                    }
-                })
-                var headers = HTTPHeaders()
-                headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
-                return Response(status: .ok, headers: headers, body: body)
-            } else {
-                // Non-streaming case
-                if let transcription = WhisperTranscriptionService.transcribeAudio(
-                    at: tempFileURL, language: whisperReq.language, prompt: whisperReq.prompt, modelPaths: modelPaths
-                ) {
-                    let responseBody: String
-                    let contentType: String
-                    switch responseFormat {
-                    case "json":
-                        let jsonResponse = ["text": transcription]
-                        if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
-                           let jsonString = String(data: jsonData, encoding: .utf8) {
-                            responseBody = jsonString
-                            contentType = "application/json"
-                        } else {
-                            responseBody = "{\"error\": \"Failed to create JSON response.\"}"
-                            contentType = "application/json"
-                        }
-                    case "text":
-                         responseBody = transcription
-                         contentType = "text/plain"
-                    default:
-                        responseBody = "Unsupported response format"
-                        contentType = "text/plain"
-                    }
-                    
+                    })
                     var headers = HTTPHeaders()
+                    let contentType = responseFormat == "srt" ? "application/x-subrip" : 
+                                     responseFormat == "vtt" ? "text/vtt" : "application/json"
                     headers.add(name: "Content-Type", value: contentType)
-                    
-                    let response = Response(status: .ok, headers: headers, body: .init(string: responseBody))
-                    try? FileManager.default.removeItem(at: tempFileURL) // Clean up
-                    return response
+                    return Response(status: .ok, headers: headers, body: body)
                 } else {
-                    try? FileManager.default.removeItem(at: tempFileURL) // Clean up
-                    throw Abort(.internalServerError, reason: "Transcription failed")
+                    // Use regular streaming for simple formats (json, text)
+                    let body = Response.Body(stream: { streamWriter in
+                        let success = WhisperTranscriptionService.transcribeAudioStream(
+                            at: tempFileURL,
+                            language: whisperReq.language,
+                            prompt: whisperReq.prompt,
+                            modelPaths: modelPaths,
+                            onSegment: { segment in
+                                req.eventLoop.execute {
+                                    let output: String
+                                    switch responseFormat {
+                                    case "json":
+                                        let jsonSegment = ["text": segment]
+                                        if let jsonData = try? JSONSerialization.data(withJSONObject: jsonSegment),
+                                           let jsonString = String(data: jsonData, encoding: .utf8) {
+                                            output = jsonString + "\n"
+                                        } else {
+                                            output = ""
+                                        }
+                                    default: // text
+                                        output = segment
+                                    }
+                                    var buffer = req.byteBufferAllocator.buffer(capacity: output.utf8.count)
+                                    buffer.writeString(output)
+                                    streamWriter.write(.buffer(buffer), promise: nil)
+                                }
+                            },
+                            onCompletion: {
+                                req.eventLoop.execute {
+                                    streamWriter.write(.end, promise: nil)
+                                    try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                                }
+                            }
+                        )
+                        if !success {
+                            req.eventLoop.execute {
+                                streamWriter.write(.end, promise: nil)
+                                try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                            }
+                        }
+                    })
+                    var headers = HTTPHeaders()
+                    headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
+                    return Response(status: .ok, headers: headers, body: body)
                 }
+            } else {
+                // Non-streaming case - determine which transcription method to use
+                let responseBody: String
+                let contentType: String
+                
+                // Handle subtitle formats that need timestamps
+                if responseFormat == "srt" || responseFormat == "vtt" || responseFormat == "verbose_json" {
+                    if let segments = WhisperTranscriptionService.transcribeAudioWithTimestamps(
+                        at: tempFileURL, language: whisperReq.language, prompt: whisperReq.prompt, modelPaths: modelPaths
+                    ) {
+                        switch responseFormat {
+                        case "srt":
+                            responseBody = WhisperTranscriptionService.formatAsSRT(segments: segments)
+                            contentType = "application/x-subrip"
+                        case "vtt":
+                            responseBody = WhisperTranscriptionService.formatAsVTT(segments: segments)
+                            contentType = "text/vtt"
+                        case "verbose_json":
+                            responseBody = WhisperTranscriptionService.formatAsVerboseJSON(segments: segments)
+                            contentType = "application/json"
+                        default:
+                            responseBody = "Unsupported response format"
+                            contentType = "text/plain"
+                        }
+                    } else {
+                        responseBody = "{\"error\": \"Failed to transcribe audio with timestamps\"}"
+                        contentType = "application/json"
+                    }
+                } else {
+                    // Handle regular formats (json, text) - use faster transcription without timestamps
+                    if let transcription = WhisperTranscriptionService.transcribeAudio(
+                        at: tempFileURL, language: whisperReq.language, prompt: whisperReq.prompt, modelPaths: modelPaths
+                    ) {
+                        switch responseFormat {
+                        case "json":
+                            let jsonResponse = ["text": transcription]
+                            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
+                               let jsonString = String(data: jsonData, encoding: .utf8) {
+                                responseBody = jsonString
+                                contentType = "application/json"
+                            } else {
+                                responseBody = "{\"error\": \"Failed to create JSON response.\"}"
+                                contentType = "application/json"
+                            }
+                        case "text":
+                            responseBody = transcription
+                            contentType = "text/plain"
+                        default:
+                            responseBody = "Unsupported response format"
+                            contentType = "text/plain"
+                        }
+                    } else {
+                        responseBody = "{\"error\": \"Transcription failed\"}"
+                        contentType = "application/json"
+                    }
+                }
+                
+                var headers = HTTPHeaders()
+                headers.add(name: "Content-Type", value: contentType)
+                
+                let response = Response(status: .ok, headers: headers, body: .init(string: responseBody))
+                try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                return response
             }
         }
     }

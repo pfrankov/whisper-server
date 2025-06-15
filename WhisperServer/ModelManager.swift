@@ -59,6 +59,9 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
     
     /// Flag to indicate if model is ready for use
     @Published private(set) var isModelReady: Bool = false
+    
+    /// Flag to prevent duplicate model preparation calls
+    private var isPreparingModel: Bool = false
 
     private let fileManager = FileManager.default
     private var modelsDirectory: URL?
@@ -158,6 +161,13 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
             return
         }
 
+        // Prevent duplicate calls
+        if isPreparingModel {
+            print("⏳ Model preparation already in progress for \(model.name), skipping duplicate call")
+            return
+        }
+        
+        isPreparingModel = true
         currentStatus = "Checking model: \(model.name)"
         print("Checking files for model: \(model.name)")
         isModelReady = false
@@ -170,6 +180,7 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
                     currentStatus = "Model '\(model.name)' is ready."
                     print("All files for model \(model.name) exist locally.")
                     isModelReady = true
+                    isPreparingModel = false // Reset flag
                     NotificationCenter.default.post(name: NSNotification.Name("ModelIsReady"), object: self)
                 } else {
                     currentStatus = "Downloading model: \(model.name)..."
@@ -179,12 +190,14 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
                     try await downloadAndPrepareModel(model: model, directory: modelsDir)
                     // After successful download, model is ready
                     isModelReady = true
+                    isPreparingModel = false // Reset flag
                     NotificationCenter.default.post(name: NSNotification.Name("ModelIsReady"), object: self)
                 }
             } catch {
                 currentStatus = "Error checking model files: \(error.localizedDescription)"
                 print("Error checking model files: \(error)")
                 isModelReady = false
+                isPreparingModel = false // Reset flag on error
                 NotificationCenter.default.post(name: NSNotification.Name("ModelPreparationFailed"), object: self)
             }
         }
