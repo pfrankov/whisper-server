@@ -13,6 +13,17 @@ struct WhisperTranscriptionService {
     /// Notification name for when Metal is activated
     static let metalActivatedNotificationName = NSNotification.Name("WhisperMetalActivated")
     
+    /// Maximum chunk duration in seconds (5 minutes)
+    public static var maxChunkDuration: Double = 30 // 5 minutes by default
+    
+    /// Overlap between chunks in seconds to avoid cutting words
+    public static var chunkOverlap: Double = 0 // 5 seconds by default
+    
+    /// Whether to reset Whisper context between chunks for memory isolation
+    /// When true: Each chunk gets a completely isolated context (prevents state interference, uses more memory)
+    /// When false: All chunks share the same context (faster, uses less memory, but may have state interference)
+    public static var resetContextBetweenChunks: Bool = false
+    
     // MARK: - Subtitle Data Structures
     
     /// Represents a segment of transcription with timing information
@@ -242,6 +253,136 @@ struct WhisperTranscriptionService {
             let data = UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength))
             return Array(data)
         }
+        
+        /// Creates audio chunks from the source audio file
+        /// - Parameters:
+        ///   - audioURL: URL of the original audio file
+        ///   - maxDuration: Maximum duration of each chunk in seconds
+        ///   - overlap: Overlap between chunks in seconds
+        /// - Returns: Array of audio sample arrays, each representing a chunk
+        static func createAudioChunks(from audioURL: URL, maxDuration: Double, overlap: Double) -> [(samples: [Float], startTime: Double, endTime: Double)]? {
+            print("🔄 Creating audio chunks (max: \(Int(maxDuration))s, overlap: \(Int(overlap))s)")
+            
+            // Target format: 16kHz mono float
+            let targetSampleRate = 16000.0
+            let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                           sampleRate: targetSampleRate,
+                                           channels: 1,
+                                           interleaved: false)!
+            
+            // Try to create an AVAudioFile from the data
+            guard let audioFile = try? AVAudioFile(forReading: audioURL) else {
+                print("❌ Failed to create AVAudioFile for reading from URL: \(audioURL.path)")
+                return nil
+            }
+            
+            let sourceFormat = audioFile.processingFormat
+            let totalDuration = Double(audioFile.length) / sourceFormat.sampleRate
+            
+            print("🔍 Source format: \(sourceFormat.sampleRate)Hz, \(sourceFormat.channelCount) channels")
+            print("🔍 Total duration: \(String(format: "%.1f", totalDuration)) seconds")
+            
+            // If the audio is shorter than maxDuration, process as single chunk
+            if totalDuration <= maxDuration {
+                print("📋 Audio is short enough, processing as single chunk")
+                guard let samples = convertAudioFile(audioFile, toFormat: outputFormat) else {
+                    return nil
+                }
+                return [(samples: samples, startTime: 0.0, endTime: totalDuration)]
+            }
+            
+            // Calculate chunks
+            var chunks: [(samples: [Float], startTime: Double, endTime: Double)] = []
+            var currentStart: Double = 0.0
+            
+            while currentStart < totalDuration {
+                let currentEnd = min(currentStart + maxDuration, totalDuration)
+                let actualStart = max(0.0, currentStart - (chunks.count > 0 ? overlap : 0.0))
+                
+                print("🔄 Processing chunk \(chunks.count + 1): \(String(format: "%.1f", actualStart))s - \(String(format: "%.1f", currentEnd))s")
+                
+                // Extract chunk samples
+                guard let chunkSamples = extractAudioChunk(from: audioFile, 
+                                                          startTime: actualStart, 
+                                                          endTime: currentEnd, 
+                                                          targetFormat: outputFormat) else {
+                    print("❌ Failed to extract chunk at \(actualStart)s - \(currentEnd)s")
+                    return nil
+                }
+                
+                chunks.append((samples: chunkSamples, startTime: currentStart, endTime: currentEnd))
+                
+                // Move to next chunk
+                currentStart = currentEnd
+            }
+            
+            print("✅ Created \(chunks.count) audio chunks")
+            return chunks
+        }
+        
+        /// Extracts a specific time segment from audio file
+        private static func extractAudioChunk(from audioFile: AVAudioFile, 
+                                            startTime: Double, 
+                                            endTime: Double, 
+                                            targetFormat: AVAudioFormat) -> [Float]? {
+            let sourceFormat = audioFile.processingFormat
+            let startFrame = AVAudioFramePosition(startTime * sourceFormat.sampleRate)
+            let endFrame = AVAudioFramePosition(endTime * sourceFormat.sampleRate)
+            let frameCount = AVAudioFrameCount(endFrame - startFrame)
+            
+            guard frameCount > 0 else {
+                print("❌ Invalid frame count: \(frameCount)")
+                return nil
+            }
+            
+            // Create buffer for the chunk
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else {
+                print("❌ Failed to create chunk buffer")
+                return nil
+            }
+            
+            // Seek to start position and read chunk
+            audioFile.framePosition = startFrame
+            do {
+                try audioFile.read(into: buffer, frameCount: frameCount)
+            } catch {
+                print("❌ Failed to read audio chunk: \(error.localizedDescription)")
+                return nil
+            }
+            
+            // Convert to target format if needed
+            if abs(sourceFormat.sampleRate - targetFormat.sampleRate) < 1.0 && 
+               sourceFormat.channelCount == targetFormat.channelCount {
+                return extractSamplesFromBuffer(buffer)
+            } else {
+                // Create converter for this chunk
+                guard let converter = AVAudioConverter(from: sourceFormat, to: targetFormat) else {
+                    print("❌ Failed to create chunk converter")
+                    return nil
+                }
+                
+                let ratio = targetFormat.sampleRate / sourceFormat.sampleRate
+                let outputFrameCapacity = AVAudioFrameCount(Double(frameCount) * ratio * 1.1)
+                
+                guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrameCapacity) else {
+                    print("❌ Failed to create chunk output buffer")
+                    return nil
+                }
+                
+                var error: NSError?
+                let status = converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+                    outStatus.pointee = .haveData
+                    return buffer
+                }
+                
+                if status == .error || error != nil {
+                    print("❌ Chunk conversion failed: \(error?.localizedDescription ?? "unknown error")")
+                    return nil
+                }
+                
+                return extractSamplesFromBuffer(outputBuffer)
+            }
+        }
         #endif
     }
 
@@ -419,6 +560,102 @@ struct WhisperTranscriptionService {
         print("✅ Context will be reinitialized on next use with new model")
     }
     
+    /// Configures context isolation behavior for chunk processing
+    /// - Parameter enabled: When true, each chunk gets a completely isolated context (prevents state interference, uses more memory)
+    ///                     When false, all chunks share the same context (faster, uses less memory, but may have state interference)
+    static func setContextIsolationEnabled(_ enabled: Bool) {
+        resetContextBetweenChunks = enabled
+        print("🔧 Context isolation between chunks: \(enabled ? "ENABLED" : "DISABLED")")
+        print("   - \(enabled ? "Each chunk gets isolated context (more memory, no state interference)" : "Chunks share context (less memory, potential state interference)")")
+    }
+    
+    /// Gets the current context isolation setting
+    /// - Returns: True if context isolation is enabled, false otherwise
+    static func isContextIsolationEnabled() -> Bool {
+        return resetContextBetweenChunks
+    }
+    
+    /// Configures audio chunking parameters
+    /// - Parameters:
+    ///   - maxDuration: Maximum duration of each chunk in seconds (minimum 10 seconds)
+    ///   - overlap: Overlap between chunks in seconds (minimum 0 seconds)
+    static func setChunkingParameters(maxDuration: Double, overlap: Double = 0.0) {
+        maxChunkDuration = max(10.0, maxDuration) // Minimum 10 seconds
+        chunkOverlap = max(0.0, overlap) // Minimum 0 seconds
+        print("🔧 Chunking parameters updated:")
+        print("   - Max chunk duration: \(Int(maxChunkDuration)) seconds")
+        print("   - Chunk overlap: \(Int(chunkOverlap)) seconds")
+    }
+    
+    /// Gets the current chunking parameters
+    /// - Returns: Tuple with max duration and overlap in seconds
+    static func getChunkingParameters() -> (maxDuration: Double, overlap: Double) {
+        return (maxDuration: maxChunkDuration, overlap: chunkOverlap)
+    }
+    
+    /// Forces release of the current Whisper context for memory isolation between chunks
+    /// This function MUST be called from within a lock.
+    private static func resetContextForChunk() {
+        // Release current context if it exists
+        if let ctx = sharedContext {
+            let memoryBefore = getMemoryUsage()
+            whisper_free(ctx)
+            sharedContext = nil
+            let memoryAfter = getMemoryUsage()
+            let freed = max(0, memoryBefore - memoryAfter)
+            print("🔄 Whisper context reset between chunks, freed ~\(freed) MB")
+        }
+    }
+    
+    /// Creates an isolated Whisper context for chunk processing that doesn't interfere with shared context
+    /// This function MUST be called from within a lock.
+    /// - Parameter modelPaths: The paths to the model files.
+    /// - Returns: An `OpaquePointer` to a new isolated Whisper context, or `nil` on failure.
+    private static func createIsolatedContext(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
+        guard let paths = modelPaths else {
+            print("❌ Cannot create isolated context: Model paths are not provided.")
+            return nil
+        }
+
+        let memoryBefore = getMemoryUsage()
+
+        #if os(macOS) || os(iOS)
+        setupMetalShaderCache()
+        #endif
+
+        let binPath = paths.binPath
+        print("🔄 Creating isolated Whisper context from: \(binPath.lastPathComponent)")
+
+        // Verify file exists and can be accessed
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: binPath.path),
+              fileManager.isReadableFile(atPath: binPath.path) else {
+            print("❌ Model file doesn't exist or isn't readable at: \(binPath.path)")
+            return nil
+        }
+
+        var contextParams = whisper_context_default_params()
+
+        #if os(macOS) || os(iOS)
+        contextParams.use_gpu = true
+        contextParams.flash_attn = true
+        // Additional Metal optimizations
+        setenv("WHISPER_METAL_NDIM", "128", 1)  // Optimization for batch size
+        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Allocate more memory for Metal
+        #endif
+
+        guard let isolatedContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
+            print("❌ Failed to create isolated Whisper context from file.")
+            return nil
+        }
+
+        let memoryAfter = getMemoryUsage()
+        let used = max(0, memoryAfter - memoryBefore)
+        print("✅ Isolated Whisper context created, using ~\(used) MB")
+
+        return isolatedContext
+    }
+    
     /// Performs context check and initialization without performing transcription
     /// - Returns: True if initialization was successful
     static func preloadModelForShaderCaching(modelBinPath: URL? = nil, modelEncoderDir: URL? = nil) -> Bool {
@@ -547,9 +784,17 @@ struct WhisperTranscriptionService {
         // Reset the inactivity timer since we're using Whisper now
         resetInactivityTimer()
         
-        // Get or initialize context
-        guard let context = getOrCreateContext(modelPaths: modelPaths) else {
+        // Get or initialize context (we create isolated contexts for each chunk)
+        guard getOrCreateContext(modelPaths: modelPaths) != nil else {
             print("❌ Failed to get or create Whisper context.")
+            return nil
+        }
+        
+        // Create audio chunks
+        guard let chunks = AudioConverter.createAudioChunks(from: audioURL, 
+                                                           maxDuration: maxChunkDuration, 
+                                                           overlap: chunkOverlap) else {
+            print("❌ Failed to create audio chunks")
             return nil
         }
         
@@ -585,32 +830,100 @@ struct WhisperTranscriptionService {
         // Use available CPU cores efficiently
         params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
         
-        // Convert audio to samples for Whisper using the new converter
-        guard let samples = AudioConverter.convertToWhisperFormat(from: audioURL) else {
-            print("❌ Failed to convert audio data to Whisper format")
-            return nil
+        var combinedTranscription: [String] = []
+        
+        // Process each chunk
+        for (index, chunk) in chunks.enumerated() {
+            print("🔄 Processing chunk \(index + 1)/\(chunks.count) (\(String(format: "%.1f", chunk.startTime))s - \(String(format: "%.1f", chunk.endTime))s)")
+            
+            // Create isolated context for each chunk to prevent state interference
+            let currentContext: OpaquePointer
+            if resetContextBetweenChunks {
+                guard let isolatedContext = createIsolatedContext(modelPaths: modelPaths) else {
+                    print("❌ Failed to create isolated Whisper context for chunk \(index + 1)")
+                    continue
+                }
+                currentContext = isolatedContext
+                print("✅ Isolated Whisper context created for chunk \(index + 1)")
+            } else {
+                // Use shared context for compatibility
+                guard let sharedContext = getOrCreateContext(modelPaths: modelPaths) else {
+                    print("❌ Failed to get shared Whisper context for chunk \(index + 1)")
+                    continue
+                }
+                currentContext = sharedContext
+            }
+            
+            // Start transcription for this chunk
+            var result: Int32 = -1
+            chunk.samples.withUnsafeBufferPointer { samples in
+                result = whisper_full(currentContext, params, samples.baseAddress, Int32(samples.count))
+            }
+            
+            if result != 0 {
+                print("❌ Error during transcription execution for chunk \(index + 1)")
+                continue // Skip this chunk and continue with others
+            }
+            
+            // Collect results from this chunk
+            let numSegments = whisper_full_n_segments(currentContext)
+            var chunkTranscription = ""
+            
+            for i in 0..<numSegments {
+                chunkTranscription += String(cString: whisper_full_get_segment_text(currentContext, i))
+            }
+            
+            let trimmedChunk = chunkTranscription.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedChunk.isEmpty {
+                // Apply overlap filtering for chunks after the first one
+                if index > 0 && !combinedTranscription.isEmpty {
+                    let filteredChunk = removeOverlapFromChunk(trimmedChunk, previousChunk: combinedTranscription.last ?? "")
+                    combinedTranscription.append(filteredChunk)
+                } else {
+                    combinedTranscription.append(trimmedChunk)
+                }
+                print("✅ Chunk \(index + 1) processed successfully (\(trimmedChunk.count) characters)")
+            } else {
+                print("⚠️ Chunk \(index + 1) produced no transcription")
+            }
+            
+            // Free isolated context immediately after processing this chunk
+            if resetContextBetweenChunks {
+                let memoryBefore = getMemoryUsage()
+                whisper_free(currentContext)
+                let memoryAfter = getMemoryUsage()
+                let freed = max(0, memoryBefore - memoryAfter)
+                print("🧹 Isolated context for chunk \(index + 1) freed, released ~\(freed) MB")
+            }
         }
         
-        // Start transcription
-        var result: Int32 = -1
-        samples.withUnsafeBufferPointer { samples in
-            result = whisper_full(context, params, samples.baseAddress, Int32(samples.count))
+        let finalResult = combinedTranscription.joined(separator: " ")
+        print("✅ Combined transcription complete (\(finalResult.count) characters total)")
+        
+        return finalResult.isEmpty ? nil : finalResult
+    }
+    
+    /// Removes potential overlap from a chunk by comparing with the end of the previous chunk
+    private static func removeOverlapFromChunk(_ currentChunk: String, previousChunk: String) -> String {
+        // Simple overlap detection: check if the beginning of current chunk matches the end of previous
+        let words = currentChunk.split(separator: " ", omittingEmptySubsequences: true)
+        let prevWords = previousChunk.split(separator: " ", omittingEmptySubsequences: true)
+        
+        // Check for overlap up to 10 words
+        let maxOverlapWords = min(10, min(words.count, prevWords.count))
+        
+        for overlapLength in (1...maxOverlapWords).reversed() {
+            let currentStart = Array(words.prefix(overlapLength))
+            let previousEnd = Array(prevWords.suffix(overlapLength))
+            
+            if currentStart.map(String.init) == previousEnd.map(String.init) {
+                print("🔄 Detected \(overlapLength)-word overlap, removing from current chunk")
+                let filteredWords = Array(words.dropFirst(overlapLength))
+                return filteredWords.joined(separator: " ")
+            }
         }
         
-        if result != 0 {
-            print("❌ Error during transcription execution")
-            return nil
-        }
-        
-        // Collect results
-        let numSegments = whisper_full_n_segments(context)
-        var transcription = ""
-        
-        for i in 0..<numSegments {
-            transcription += String(cString: whisper_full_get_segment_text(context, i))
-        }
-        
-        return transcription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return currentChunk
     }
     
     /// Performs transcription of audio data and returns segments with timestamps for subtitle formats
@@ -627,9 +940,17 @@ struct WhisperTranscriptionService {
         // Reset the inactivity timer since we're using Whisper now
         resetInactivityTimer()
         
-        // Get or initialize context
-        guard let context = getOrCreateContext(modelPaths: modelPaths) else {
+        // Get or initialize context (we create isolated contexts for each chunk)
+        guard getOrCreateContext(modelPaths: modelPaths) != nil else {
             print("❌ Failed to get or create Whisper context.")
+            return nil
+        }
+        
+        // Create audio chunks
+        guard let chunks = AudioConverter.createAudioChunks(from: audioURL, 
+                                                           maxDuration: maxChunkDuration, 
+                                                           overlap: chunkOverlap) else {
+            print("❌ Failed to create audio chunks")
             return nil
         }
         
@@ -665,41 +986,123 @@ struct WhisperTranscriptionService {
         // Use available CPU cores efficiently
         params.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
         
-        // Convert audio to samples for Whisper using the new converter
-        guard let samples = AudioConverter.convertToWhisperFormat(from: audioURL) else {
-            print("❌ Failed to convert audio data to Whisper format")
-            return nil
-        }
+        var allSegments: [TranscriptionSegment] = []
         
-        // Start transcription
-        var result: Int32 = -1
-        samples.withUnsafeBufferPointer { samples in
-            result = whisper_full(context, params, samples.baseAddress, Int32(samples.count))
-        }
-        
-        if result != 0 {
-            print("❌ Error during transcription execution")
-            return nil
-        }
-        
-        // Collect segments with timestamps
-        let numSegments = whisper_full_n_segments(context)
-        var segments: [TranscriptionSegment] = []
-        
-        for i in 0..<numSegments {
-            let text = String(cString: whisper_full_get_segment_text(context, i))
-            let startTime = Double(whisper_full_get_segment_t0(context, i)) / 100.0  // Convert to seconds
-            let endTime = Double(whisper_full_get_segment_t1(context, i)) / 100.0    // Convert to seconds
+        // Process each chunk
+        for (index, chunk) in chunks.enumerated() {
+            print("🔄 Processing chunk \(index + 1)/\(chunks.count) for timestamps (\(String(format: "%.1f", chunk.startTime))s - \(String(format: "%.1f", chunk.endTime))s)")
             
-            let segment = TranscriptionSegment(
-                startTime: startTime,
-                endTime: endTime,
-                text: text
-            )
-            segments.append(segment)
+            // Create isolated context for each chunk to prevent state interference
+            let currentContext: OpaquePointer
+            if resetContextBetweenChunks {
+                guard let isolatedContext = createIsolatedContext(modelPaths: modelPaths) else {
+                    print("❌ Failed to create isolated Whisper context for timestamps chunk \(index + 1)")
+                    continue
+                }
+                currentContext = isolatedContext
+                print("✅ Isolated Whisper context created for timestamps chunk \(index + 1)")
+            } else {
+                // Use shared context for compatibility
+                guard let sharedContext = getOrCreateContext(modelPaths: modelPaths) else {
+                    print("❌ Failed to get shared Whisper context for timestamps chunk \(index + 1)")
+                    continue
+                }
+                currentContext = sharedContext
+            }
+            
+            // Start transcription for this chunk
+            var result: Int32 = -1
+            chunk.samples.withUnsafeBufferPointer { samples in
+                result = whisper_full(currentContext, params, samples.baseAddress, Int32(samples.count))
+            }
+            
+            if result != 0 {
+                print("❌ Error during transcription execution for chunk \(index + 1)")
+                continue // Skip this chunk and continue with others
+            }
+            
+            // Collect segments with timestamps from this chunk
+            let numSegments = whisper_full_n_segments(currentContext)
+            var chunkSegments: [TranscriptionSegment] = []
+            
+            for i in 0..<numSegments {
+                let text = String(cString: whisper_full_get_segment_text(currentContext, i))
+                let segmentStartTime = Double(whisper_full_get_segment_t0(currentContext, i)) / 100.0  // Convert to seconds
+                let segmentEndTime = Double(whisper_full_get_segment_t1(currentContext, i)) / 100.0    // Convert to seconds
+                
+                // Adjust timestamps to account for chunk offset
+                let adjustedStartTime = chunk.startTime + segmentStartTime
+                let adjustedEndTime = chunk.startTime + segmentEndTime
+                
+                let segment = TranscriptionSegment(
+                    startTime: adjustedStartTime,
+                    endTime: adjustedEndTime,
+                    text: text
+                )
+                chunkSegments.append(segment)
+            }
+            
+            // Filter overlapping segments for chunks after the first one
+            if index > 0 && !allSegments.isEmpty {
+                let filteredSegments = removeOverlappingSegments(chunkSegments, previousSegments: allSegments)
+                allSegments.append(contentsOf: filteredSegments)
+            } else {
+                allSegments.append(contentsOf: chunkSegments)
+            }
+            
+            print("✅ Chunk \(index + 1) processed successfully (\(chunkSegments.count) segments)")
+            
+            // Free isolated context immediately after processing this chunk
+            if resetContextBetweenChunks {
+                let memoryBefore = getMemoryUsage()
+                whisper_free(currentContext)
+                let memoryAfter = getMemoryUsage()
+                let freed = max(0, memoryBefore - memoryAfter)
+                print("🧹 Isolated context for timestamps chunk \(index + 1) freed, released ~\(freed) MB")
+            }
         }
         
-        return segments
+        print("✅ Combined timestamp transcription complete (\(allSegments.count) segments total)")
+        
+        return allSegments.isEmpty ? nil : allSegments
+    }
+    
+    /// Removes overlapping segments from current chunk by comparing with previous segments
+    private static func removeOverlappingSegments(_ currentSegments: [TranscriptionSegment], previousSegments: [TranscriptionSegment]) -> [TranscriptionSegment] {
+        guard !previousSegments.isEmpty, !currentSegments.isEmpty else {
+            return currentSegments
+        }
+        
+        // Find the last segment from previous chunks
+        guard let lastPreviousSegment = previousSegments.last else {
+            return currentSegments
+        }
+        
+        // Find segments that might overlap based on time
+        let overlapThreshold = chunkOverlap // Use the same overlap duration
+        var filteredSegments: [TranscriptionSegment] = []
+        
+        for segment in currentSegments {
+            // Skip segments that are too close to the end of the previous chunk
+            let timeDifference = segment.startTime - lastPreviousSegment.endTime
+            if timeDifference > overlapThreshold || !segmentsHaveTextOverlap(segment, lastPreviousSegment) {
+                filteredSegments.append(segment)
+            } else {
+                print("🔄 Skipping overlapping segment: '\(segment.text.prefix(30))...'")
+            }
+        }
+        
+        return filteredSegments
+    }
+    
+    /// Checks if two segments have overlapping text content
+    private static func segmentsHaveTextOverlap(_ segment1: TranscriptionSegment, _ segment2: TranscriptionSegment) -> Bool {
+        let words1 = segment1.text.split(separator: " ", omittingEmptySubsequences: true)
+        let words2 = segment2.text.split(separator: " ", omittingEmptySubsequences: true)
+        
+        // Check for any common words (simple overlap detection)
+        let commonWords = Set(words1).intersection(Set(words2))
+        return commonWords.count > 2 // Require at least 3 common words to consider overlap
     }
     
     /// User data structure to pass to whisper.cpp callbacks
