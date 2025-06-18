@@ -34,8 +34,7 @@ final class VaporServer {
         guard !isRunning else { return }
         
         do {
-            var env = try Environment.detect()
-            try LoggingSystem.bootstrap(from: &env)
+            let env = try Environment.detect()
             let app = Application(env)
             self.app = app
             
@@ -50,10 +49,15 @@ final class VaporServer {
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     try app.run()
-                    self.isRunning = true
-                    print("✅ Vapor server started on http://localhost:\(self.port)")
+                    DispatchQueue.main.async {
+                        self.isRunning = true
+                        print("✅ Vapor server started on http://localhost:\(self.port)")
+                    }
                 } catch {
                     print("❌ Failed to start Vapor server: \(error)")
+                    DispatchQueue.main.async {
+                        self.isRunning = false
+                    }
                 }
             }
         } catch {
@@ -126,9 +130,11 @@ final class VaporServer {
                 // Check if client supports SSE
                 let useSSE = self.supportsSSE(req)
                 
+                print("🚀 Starting streaming transcription (SSE: \(useSSE), format: \(responseFormat))")
+                
                 // Choose the appropriate streaming method based on format
                 if responseFormat == "srt" || responseFormat == "vtt" || responseFormat == "verbose_json" {
-                    // Use timestamp streaming for subtitle formats
+                    print("📊 Using timestamp streaming for format: \(responseFormat)")
                     var segmentCounter = 0
                     let body = Response.Body(stream: { streamWriter in
                         let success = WhisperTranscriptionService.transcribeAudioStreamWithTimestamps(
@@ -177,27 +183,40 @@ final class VaporServer {
                                     
                                     // Format output based on streaming method
                                     let finalOutput = useSSE ? self.formatSSEData(output) : output
+                                    let chunkSize = finalOutput.utf8.count
+                                    print("📤 Sending streaming chunk #\(segmentCounter) (\(chunkSize) bytes, format: \(responseFormat), SSE: \(useSSE))")
+                                    if responseFormat == "text" || responseFormat == "json" {
+                                        print("   Content preview: \(String(finalOutput.prefix(100)))")
+                                    }
+                                    
                                     var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
                                     buffer.writeString(finalOutput)
                                     streamWriter.write(.buffer(buffer), promise: nil)
+                                    
+                                    print("✅ Chunk #\(segmentCounter) written to stream successfully")
                                 }
                             },
                             onCompletion: {
                                 req.eventLoop.execute {
+                                    print("🏁 Streaming with timestamps completion called")
                                     if useSSE {
                                         // Send SSE end event
                                         let endEvent = "event: end\ndata: \n\n"
+                                        print("📤 Sending SSE end event (\(endEvent.utf8.count) bytes)")
                                         var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
                                         buffer.writeString(endEvent)
                                         streamWriter.write(.buffer(buffer), promise: nil)
+                                        print("✅ SSE end event written to stream")
                                     }
                                     streamWriter.write(.end, promise: nil)
+                                    print("🔚 Stream ended, cleaning up temp file")
                                     try? FileManager.default.removeItem(at: tempFileURL) // Clean up
                                 }
                             }
                         )
                         if !success {
                             req.eventLoop.execute {
+                                print("❌ Streaming with timestamps failed")
                                 streamWriter.write(.end, promise: nil)
                                 try? FileManager.default.removeItem(at: tempFileURL) // Clean up
                             }
@@ -217,6 +236,7 @@ final class VaporServer {
                     return Response(status: .ok, headers: headers, body: body)
                 } else {
                     // Use regular streaming for simple formats (json, text)
+                    print("📝 Using regular streaming for format: \(responseFormat)")
                     let body = Response.Body(stream: { streamWriter in
                         let success = WhisperTranscriptionService.transcribeAudioStream(
                             at: tempFileURL,
@@ -241,27 +261,38 @@ final class VaporServer {
                                     
                                     // Format output based on streaming method
                                     let finalOutput = useSSE ? self.formatSSEData(output) : output
+                                    let chunkSize = finalOutput.utf8.count
+                                    print("📤 Sending regular streaming chunk (\(chunkSize) bytes, format: \(responseFormat), SSE: \(useSSE))")
+                                    print("   Content preview: \(String(finalOutput.prefix(100)))")
+                                    
                                     var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
                                     buffer.writeString(finalOutput)
                                     streamWriter.write(.buffer(buffer), promise: nil)
+                                    
+                                    print("✅ Regular chunk written to stream successfully")
                                 }
                             },
                             onCompletion: {
                                 req.eventLoop.execute {
+                                    print("🏁 Regular streaming completion called")
                                     if useSSE {
                                         // Send SSE end event
                                         let endEvent = "event: end\ndata: \n\n"
+                                        print("📤 Sending SSE end event (\(endEvent.utf8.count) bytes)")
                                         var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
                                         buffer.writeString(endEvent)
                                         streamWriter.write(.buffer(buffer), promise: nil)
+                                        print("✅ SSE end event written to stream")
                                     }
                                     streamWriter.write(.end, promise: nil)
+                                    print("🔚 Stream ended, cleaning up temp file")
                                     try? FileManager.default.removeItem(at: tempFileURL) // Clean up
                                 }
                             }
                         )
                         if !success {
                             req.eventLoop.execute {
+                                print("❌ Regular streaming failed")
                                 streamWriter.write(.end, promise: nil)
                                 try? FileManager.default.removeItem(at: tempFileURL) // Clean up
                             }

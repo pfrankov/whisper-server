@@ -732,13 +732,17 @@ struct WhisperTranscriptionService {
         let userData = Unmanaged<TranscriptionUserData>.fromOpaque(user_data).takeUnretainedValue()
         
         let n_segments = whisper_full_n_segments(ctx)
+        print("🔄 Whisper callback: \(n_new) new segments, total: \(n_segments)")
         
         for i in (n_segments - n_new)..<n_segments {
             // Avoid processing the same segment twice
             if i > userData.lastSegment {
                 if let text = whisper_full_get_segment_text(ctx, i) {
-                    userData.onSegment(String(cString: text))
+                    let segmentText = String(cString: text)
+                    print("🎯 Generated segment #\(i): '\(segmentText.prefix(50))...'")
+                    userData.onSegment(segmentText)
                     userData.lastSegment = Int(i)
+                    print("✅ Segment #\(i) sent to callback")
                 }
             }
         }
@@ -750,6 +754,7 @@ struct WhisperTranscriptionService {
         let userData = Unmanaged<TranscriptionUserDataWithTimestamps>.fromOpaque(user_data).takeUnretainedValue()
         
         let n_segments = whisper_full_n_segments(ctx)
+        print("🔄 Whisper timestamp callback: \(n_new) new segments, total: \(n_segments)")
         
         for i in (n_segments - n_new)..<n_segments {
             // Avoid processing the same segment twice
@@ -757,14 +762,18 @@ struct WhisperTranscriptionService {
                 if let text = whisper_full_get_segment_text(ctx, i) {
                     let startTime = Double(whisper_full_get_segment_t0(ctx, i)) / 100.0
                     let endTime = Double(whisper_full_get_segment_t1(ctx, i)) / 100.0
+                    let segmentText = String(cString: text)
+                    
+                    print("🎯 Generated timestamped segment #\(i): [\(String(format: "%.2f", startTime))-\(String(format: "%.2f", endTime))s] '\(segmentText.prefix(50))...'")
                     
                     let segment = TranscriptionSegment(
                         startTime: startTime,
                         endTime: endTime,
-                        text: String(cString: text)
+                        text: segmentText
                     )
                     userData.onSegment(segment)
                     userData.lastSegment = Int(i)
+                    print("✅ Timestamped segment #\(i) sent to callback")
                 }
             }
         }
@@ -797,12 +806,16 @@ struct WhisperTranscriptionService {
             lock.lock(); defer { lock.unlock() }
 
             resetInactivityTimer()
+            
+            print("🎵 Starting regular streaming transcription for file: \(audioURL.lastPathComponent)")
 
             guard let context = getOrCreateContext(modelPaths: modelPaths) else {
                 print("❌ Failed to get or create Whisper context for streaming.")
                 onCompletion()
                 return
             }
+            
+            print("✅ Whisper context ready for regular streaming")
 
             var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
             params.print_realtime = false
@@ -843,12 +856,16 @@ struct WhisperTranscriptionService {
                 onCompletion()
                 return
             }
+            
+            print("🔊 Audio converted, starting whisper_full with \(samples.count) samples")
 
             // Run transcription
             samples.withUnsafeBufferPointer { samplesBuffer in
                 let result = whisper_full(context, params, samplesBuffer.baseAddress, Int32(samplesBuffer.count))
                 if result != 0 {
                     print("❌ Error during streaming transcription execution")
+                } else {
+                    print("✅ Regular streaming transcription completed successfully")
                 }
                 // Call completion handler
                 userData.onCompletion()
@@ -882,11 +899,15 @@ struct WhisperTranscriptionService {
 
             resetInactivityTimer()
 
+            print("🎵 Starting timestamp streaming transcription for file: \(audioURL.lastPathComponent)")
+
             guard let context = getOrCreateContext(modelPaths: modelPaths) else {
                 print("❌ Failed to get or create Whisper context for timestamp streaming.")
                 onCompletion()
                 return
             }
+            
+            print("✅ Whisper context ready for timestamp streaming")
 
             var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
             params.print_realtime = false
@@ -928,11 +949,15 @@ struct WhisperTranscriptionService {
                 return
             }
 
+            print("🔊 Audio converted, starting whisper_full with \(samples.count) samples (timestamps enabled)")
+
             // Run transcription
             samples.withUnsafeBufferPointer { samplesBuffer in
                 let result = whisper_full(context, params, samplesBuffer.baseAddress, Int32(samplesBuffer.count))
                 if result != 0 {
                     print("❌ Error during timestamp streaming transcription execution")
+                } else {
+                    print("✅ Timestamp streaming transcription completed successfully")
                 }
                 // Call completion handler
                 userData.onCompletion()
