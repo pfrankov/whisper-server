@@ -4,6 +4,7 @@ import whisper
 import SwiftUI
 import AVFoundation
 import Darwin
+import AppKit
 #endif
 
 /// Audio transcription service using whisper.cpp
@@ -13,16 +14,36 @@ struct WhisperTranscriptionService {
     /// Notification name for when Metal is activated
     static let metalActivatedNotificationName = NSNotification.Name("WhisperMetalActivated")
     
-    /// Maximum chunk duration in seconds (5 minutes)
-    public static var maxChunkDuration: Double = 30 // 5 minutes by default
+    // MARK: Audio Processing Constants
+    private static let targetSampleRate = 16000.0
+    private static let minChunkDuration = 20.0
+    private static let defaultMaxChunkDuration = 30.0
+    
+    /// Maximum chunk duration in seconds
+    public static var maxChunkDuration: Double = defaultMaxChunkDuration
     
     /// Overlap between chunks in seconds to avoid cutting words
-    public static var chunkOverlap: Double = 0 // 5 seconds by default
+    public static var chunkOverlap: Double = 0 // 0 seconds by default (no overlap)
     
     /// Whether to reset Whisper context between chunks for memory isolation
     /// When true: Each chunk gets a completely isolated context (prevents state interference, uses more memory)
     /// When false: All chunks share the same context (faster, uses less memory, but may have state interference)
     public static var resetContextBetweenChunks: Bool = false
+    
+    /// Whether to use Voice Activity Detection for smart chunking
+    public static var useVADChunking: Bool = true
+    
+    /// Whether to remove leading silence from chunks to prevent hallucinations
+    public static var removeLeadingSilence: Bool = true
+    
+    /// Energy threshold for VAD (0.0-1.0, lower = more sensitive)
+    public static var vadEnergyThreshold: Float = 0.02
+    
+    /// Minimum speech duration in seconds
+    public static var vadMinSpeechDuration: Double = 0.3
+    
+    /// Minimum silence duration in seconds to split chunks
+    public static var vadMinSilenceDuration: Double = 0.5
     
     // MARK: - Subtitle Data Structures
     
@@ -154,7 +175,6 @@ struct WhisperTranscriptionService {
             print("🔄 Converting audio to Whisper format (16kHz mono float)")
             
             // Target format: 16kHz mono float
-            let targetSampleRate = 16000.0
             let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                            sampleRate: targetSampleRate,
                                            channels: 1,
@@ -168,9 +188,18 @@ struct WhisperTranscriptionService {
             
             let sourceFormat = audioFile.processingFormat
             print("🔍 Source format: \(sourceFormat.sampleRate)Hz, \(sourceFormat.channelCount) channels")
+            print("🔍 Source duration: \(String(format: "%.2f", Double(audioFile.length) / sourceFormat.sampleRate))s")
+            print("🔍 Target format: \(outputFormat.sampleRate)Hz, \(outputFormat.channelCount) channels")
             
             // Convert the audio file to the required format
-            return convertAudioFile(audioFile, toFormat: outputFormat)
+            let convertedSamples = convertAudioFile(audioFile, toFormat: outputFormat)
+            
+            if let samples = convertedSamples {
+                print("🔍 Final converted samples: \(samples.count) samples")
+                print("🔍 Final duration: \(String(format: "%.2f", Double(samples.count) / outputFormat.sampleRate))s")
+            }
+            
+            return convertedSamples
         }
         
         /// Converts an audio file to the specified format
@@ -178,21 +207,27 @@ struct WhisperTranscriptionService {
             let sourceFormat = file.processingFormat
             let frameCount = AVAudioFrameCount(file.length)
             
-            // If the file is empty, return nil
-            if frameCount == 0 {
+            print("🔍 DEBUG: Source file info:")
+            print("   - Frames: \(file.length)")
+            print("   - Sample Rate: \(sourceFormat.sampleRate)Hz")
+            print("   - Channels: \(sourceFormat.channelCount)")
+            print("   - Original Duration: \(String(format: "%.2f", Double(file.length) / sourceFormat.sampleRate))s")
+            
+            // Validate input
+            guard frameCount > 0 else {
                 print("❌ Audio file is empty")
                 return nil
             }
             
             // Read the entire file into a buffer
-                guard let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else {
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else {
                 print("❌ Failed to create source PCM buffer")
                 return nil
             }
             
             do {
                 try file.read(into: buffer)
-                } catch {
+            } catch {
                 print("❌ Failed to read audio file: \(error.localizedDescription)")
                 return nil
             }
@@ -220,12 +255,30 @@ struct WhisperTranscriptionService {
             
             // Perform conversion
             var error: NSError?
+            var inputProvided = false
+            var inputBlockCallCount = 0
             let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
-                outStatus.pointee = .haveData
-                return buffer
+                inputBlockCallCount += 1
+                print("🔄 DEBUG: Input block called \(inputBlockCallCount) time(s), requested packets: \(inNumPackets)")
+                
+                if inputProvided {
+                    // We've already provided all input data
+                    outStatus.pointee = .noDataNow
+                    print("🚫 DEBUG: No more data to provide (already provided)")
+                    return nil
+                } else {
+                    // Provide the input buffer once
+                    inputProvided = true
+                    outStatus.pointee = .haveData
+                    print("✅ DEBUG: Providing input buffer with \(buffer.frameLength) frames to converter")
+                    return buffer
+                }
             }
             
             let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+            
+            print("🔄 DEBUG: Conversion completed with status: \(status)")
+            print("🔄 DEBUG: Input block was called \(inputBlockCallCount) time(s) total")
             
             if status == .error || error != nil {
                 print("❌ Conversion failed: \(error?.localizedDescription ?? "unknown error")")
@@ -238,6 +291,11 @@ struct WhisperTranscriptionService {
             }
             
             print("✅ Successfully converted to \(outputBuffer.frameLength) frames at \(outputFormat.sampleRate)Hz")
+            print("🔍 DEBUG: Converted file info:")
+            print("   - Output Frames: \(outputBuffer.frameLength)")
+            print("   - Output Sample Rate: \(outputFormat.sampleRate)Hz")
+            print("   - Expected Duration: \(String(format: "%.2f", Double(outputBuffer.frameLength) / outputFormat.sampleRate))s")
+            print("   - Conversion Ratio: \(String(format: "%.4f", Double(outputBuffer.frameLength) / Double(frameCount)))")
             
             return extractSamplesFromBuffer(outputBuffer)
         }
@@ -250,8 +308,273 @@ struct WhisperTranscriptionService {
             }
             
             // Extract samples from the first channel (mono)
-            let data = UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength))
-            return Array(data)
+            // Using reserveCapacity for better performance with large buffers
+            let frameCount = Int(buffer.frameLength)
+            var samples = [Float]()
+            samples.reserveCapacity(frameCount)
+            
+            let data = UnsafeBufferPointer(start: channelData[0], count: frameCount)
+            samples.append(contentsOf: data)
+            
+            return samples
+        }
+        
+        // MARK: - Voice Activity Detection (VAD)
+        
+        /// Represents a speech segment detected by VAD
+        struct SpeechSegment {
+            let startTime: Double
+            let endTime: Double
+            let startSample: Int
+            let endSample: Int
+        }
+        
+        /// Simple energy-based Voice Activity Detection
+        /// - Parameters:
+        ///   - samples: Audio samples at 16kHz
+        ///   - sampleRate: Sample rate (should be 16000)
+        ///   - energyThreshold: Energy threshold for speech detection (0.0-1.0)
+        ///   - minSpeechDuration: Minimum duration to consider as speech (seconds)
+        ///   - minSilenceDuration: Minimum duration to consider as silence (seconds)
+        /// - Returns: Array of detected speech segments
+        private static func detectSpeechSegments(samples: [Float], 
+                                               sampleRate: Double = targetSampleRate,
+                                               energyThreshold: Float = 0.02,
+                                               minSpeechDuration: Double = 0.3,
+                                               minSilenceDuration: Double = 0.5) -> [SpeechSegment] {
+            print("🎤 Running Voice Activity Detection on \(samples.count) samples")
+            
+            // Window size for energy calculation (20ms)
+            let windowSize = Int(sampleRate * 0.02)
+            let hopSize = windowSize / 2
+            
+            var speechSegments: [SpeechSegment] = []
+            var isSpeech = false
+            var speechStartSample = 0
+            var lastSpeechEndSample = 0
+            
+            // Calculate RMS energy for each window
+            var windowIndex = 0
+            while windowIndex + windowSize <= samples.count {
+                let windowSamples = Array(samples[windowIndex..<(windowIndex + windowSize)])
+                let energy = sqrt(windowSamples.map { $0 * $0 }.reduce(0, +) / Float(windowSize))
+                
+                if energy > energyThreshold {
+                    // Detected speech
+                    if !isSpeech {
+                        speechStartSample = windowIndex
+                        isSpeech = true
+                    }
+                    lastSpeechEndSample = windowIndex + windowSize
+                } else {
+                    // Detected silence
+                    if isSpeech {
+                        let silenceDuration = Double(windowIndex - lastSpeechEndSample) / sampleRate
+                        if silenceDuration > minSilenceDuration {
+                            // End of speech segment
+                            let speechDuration = Double(lastSpeechEndSample - speechStartSample) / sampleRate
+                            if speechDuration > minSpeechDuration {
+                                let segment = SpeechSegment(
+                                    startTime: Double(speechStartSample) / sampleRate,
+                                    endTime: Double(lastSpeechEndSample) / sampleRate,
+                                    startSample: speechStartSample,
+                                    endSample: lastSpeechEndSample
+                                )
+                                speechSegments.append(segment)
+                            }
+                            isSpeech = false
+                        }
+                    }
+                }
+                
+                windowIndex += hopSize
+            }
+            
+            // Handle last segment if still in speech
+            if isSpeech {
+                let speechDuration = Double(lastSpeechEndSample - speechStartSample) / sampleRate
+                if speechDuration > minSpeechDuration {
+                    let segment = SpeechSegment(
+                        startTime: Double(speechStartSample) / sampleRate,
+                        endTime: Double(lastSpeechEndSample) / sampleRate,
+                        startSample: speechStartSample,
+                        endSample: lastSpeechEndSample
+                    )
+                    speechSegments.append(segment)
+                }
+            }
+            
+            print("🎯 Detected \(speechSegments.count) speech segments")
+            for (index, segment) in speechSegments.enumerated() {
+                print("   - Segment \(index + 1): \(String(format: "%.1f", segment.startTime))s - \(String(format: "%.1f", segment.endTime))s")
+            }
+            
+            return speechSegments
+        }
+        
+        /// Creates audio chunks based on Voice Activity Detection
+        /// - Parameters:
+        ///   - audioURL: URL of the original audio file
+        ///   - maxDuration: Maximum duration of each chunk in seconds
+        ///   - vadEnabled: Whether to use VAD for smart chunking
+        ///   - removeLeadingSilence: Whether to remove leading silence from chunks
+        /// - Returns: Array of audio chunks with timing information
+        static func createAudioChunksWithVAD(from audioURL: URL, 
+                                           maxDuration: Double,
+                                           vadEnabled: Bool = true,
+                                           removeLeadingSilence: Bool = true) -> [(samples: [Float], startTime: Double, endTime: Double, originalStartTime: Double)]? {
+            print("🔄 Creating audio chunks with VAD (max: \(Int(maxDuration))s, VAD: \(vadEnabled ? "ON" : "OFF"))")
+            
+            // Convert audio to Whisper format first
+            guard let allSamples = convertToWhisperFormat(from: audioURL) else {
+                print("❌ Failed to convert audio to Whisper format")
+                return nil
+            }
+            
+            let totalDuration = Double(allSamples.count) / targetSampleRate
+            print("🔍 Total audio duration: \(String(format: "%.1f", totalDuration)) seconds")
+            
+            // If VAD is disabled or audio is short, use traditional chunking
+            if !vadEnabled || totalDuration <= maxDuration {
+                if totalDuration <= maxDuration {
+                    print("📋 Audio is short enough, processing as single chunk")
+                } else {
+                    print("📋 VAD disabled, using traditional chunking")
+                }
+                
+                // Fall back to traditional chunking
+                return createAudioChunks(from: audioURL, maxDuration: maxDuration, overlap: 0)?.map { chunk in
+                    (samples: chunk.samples, startTime: chunk.startTime, endTime: chunk.endTime, originalStartTime: chunk.startTime)
+                }
+            }
+            
+            // Detect speech segments
+            let speechSegments = detectSpeechSegments(
+                samples: allSamples,
+                sampleRate: targetSampleRate,
+                energyThreshold: vadEnergyThreshold,
+                minSpeechDuration: vadMinSpeechDuration,
+                minSilenceDuration: vadMinSilenceDuration
+            )
+            if speechSegments.isEmpty {
+                print("⚠️ No speech detected, processing entire audio")
+                return [(samples: allSamples, startTime: 0.0, endTime: totalDuration, originalStartTime: 0.0)]
+            }
+            
+            // Create chunks based on speech segments
+            var chunks: [(samples: [Float], startTime: Double, endTime: Double, originalStartTime: Double)] = []
+            var currentChunkSegments: [SpeechSegment] = []
+            var currentChunkDuration: Double = 0.0
+            var currentChunkStartTime: Double? = nil
+            
+            for segment in speechSegments {
+                let segmentDuration = segment.endTime - segment.startTime
+                
+                // Check if adding this segment would exceed max duration
+                if currentChunkDuration + segmentDuration > maxDuration && !currentChunkSegments.isEmpty {
+                    // Create chunk from accumulated segments
+                    if let chunk = createChunkFromSegments(currentChunkSegments, 
+                                                          allSamples: allSamples,
+                                                          removeLeadingSilence: removeLeadingSilence) {
+                        chunks.append(chunk)
+                    }
+                    
+                    // Start new chunk
+                    currentChunkSegments = [segment]
+                    currentChunkDuration = segmentDuration
+                    currentChunkStartTime = segment.startTime
+                } else if currentChunkDuration >= minChunkDuration && 
+                         currentChunkDuration + segmentDuration > maxDuration * 0.9 {
+                    // If we're above minimum duration and close to max, consider breaking here
+                    // This creates more balanced chunks in the 20-30 second range
+                    if let chunk = createChunkFromSegments(currentChunkSegments,
+                                                          allSamples: allSamples, 
+                                                          removeLeadingSilence: removeLeadingSilence) {
+                        chunks.append(chunk)
+                    }
+                    
+                    // Start new chunk
+                    currentChunkSegments = [segment]
+                    currentChunkDuration = segmentDuration
+                    currentChunkStartTime = segment.startTime
+                } else {
+                    // Add segment to current chunk
+                    currentChunkSegments.append(segment)
+                    currentChunkDuration += segmentDuration
+                    if currentChunkStartTime == nil {
+                        currentChunkStartTime = segment.startTime
+                    }
+                }
+            }
+            
+            // Process remaining segments
+            if !currentChunkSegments.isEmpty {
+                if let chunk = createChunkFromSegments(currentChunkSegments,
+                                                      allSamples: allSamples,
+                                                      removeLeadingSilence: removeLeadingSilence) {
+                    chunks.append(chunk)
+                }
+            }
+            
+            print("✅ Created \(chunks.count) VAD-based audio chunks")
+            for (index, chunk) in chunks.enumerated() {
+                print("   - Chunk \(index + 1): \(String(format: "%.1f", chunk.startTime))s - \(String(format: "%.1f", chunk.endTime))s (original: \(String(format: "%.1f", chunk.originalStartTime))s)")
+            }
+            
+            return chunks
+        }
+        
+        /// Creates a chunk from speech segments
+        private static func createChunkFromSegments(_ segments: [SpeechSegment],
+                                                  allSamples: [Float],
+                                                  removeLeadingSilence: Bool) -> (samples: [Float], startTime: Double, endTime: Double, originalStartTime: Double)? {
+            guard !segments.isEmpty else { return nil }
+            
+            let firstSegment = segments.first!
+            let lastSegment = segments.last!
+            
+            // Original time boundaries (including silence)
+            let originalStartTime = firstSegment.startTime
+            let originalEndTime = lastSegment.endTime
+            
+            if removeLeadingSilence {
+                // Extract only speech samples
+                var chunkSamples: [Float] = []
+                var adjustedStartTime = originalStartTime
+                
+                for (index, segment) in segments.enumerated() {
+                    let segmentSamples = Array(allSamples[segment.startSample..<segment.endSample])
+                    
+                    if index == 0 {
+                        // First segment - this is where transcription actually starts
+                        adjustedStartTime = segment.startTime
+                    } else {
+                        // Add small silence between segments (100ms) to preserve natural speech flow
+                        let silenceSamples = Int(targetSampleRate * 0.1) // 100ms of silence
+                        chunkSamples.append(contentsOf: Array(repeating: 0.0, count: silenceSamples))
+                    }
+                    
+                    chunkSamples.append(contentsOf: segmentSamples)
+                }
+                
+                // The adjusted end time is based on the actual duration of samples
+                let adjustedEndTime = adjustedStartTime + (Double(chunkSamples.count) / targetSampleRate)
+                
+                return (samples: chunkSamples, 
+                       startTime: adjustedStartTime, 
+                       endTime: adjustedEndTime,
+                       originalStartTime: originalStartTime)
+            } else {
+                // Keep all samples including silence
+                let startSample = segments.first!.startSample
+                let endSample = segments.last!.endSample
+                let chunkSamples = Array(allSamples[startSample..<endSample])
+                
+                return (samples: chunkSamples,
+                       startTime: originalStartTime,
+                       endTime: originalEndTime,
+                       originalStartTime: originalStartTime)
+            }
         }
         
         /// Creates audio chunks from the source audio file
@@ -264,7 +587,6 @@ struct WhisperTranscriptionService {
             print("🔄 Creating audio chunks (max: \(Int(maxDuration))s, overlap: \(Int(overlap))s)")
             
             // Target format: 16kHz mono float
-            let targetSampleRate = 16000.0
             let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                            sampleRate: targetSampleRate,
                                            channels: 1,
@@ -383,6 +705,7 @@ struct WhisperTranscriptionService {
                 return extractSamplesFromBuffer(outputBuffer)
             }
         }
+        
         #endif
     }
 
@@ -446,7 +769,7 @@ struct WhisperTranscriptionService {
     /// Gets approximate memory usage (in MB) for logging
     private static func getMemoryUsage() -> Int {
         var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
         
         let result: kern_return_t = withUnsafeMutablePointer(to: &info) {
             $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
@@ -454,11 +777,13 @@ struct WhisperTranscriptionService {
             }
         }
         
-        if result == KERN_SUCCESS {
-            return Int(info.resident_size / (1024 * 1024))
-        } else {
+        guard result == KERN_SUCCESS else {
             return 0
         }
+        
+        // Convert bytes to MB (more precise calculation)
+        let bytesInMB = Double(1024 * 1024)
+        return Int(Double(info.resident_size) / bytesInMB)
     }
     
     /// Configures a persistent Metal shader cache
@@ -577,20 +902,77 @@ struct WhisperTranscriptionService {
     
     /// Configures audio chunking parameters
     /// - Parameters:
-    ///   - maxDuration: Maximum duration of each chunk in seconds (minimum 10 seconds)
-    ///   - overlap: Overlap between chunks in seconds (minimum 0 seconds)
+    ///   - maxDuration: Maximum duration of each chunk in seconds (will be clamped to minimum 20 seconds)
+    ///   - overlap: Overlap between chunks in seconds (will be clamped to minimum 0 seconds)
     static func setChunkingParameters(maxDuration: Double, overlap: Double = 0.0) {
-        maxChunkDuration = max(10.0, maxDuration) // Minimum 10 seconds
-        chunkOverlap = max(0.0, overlap) // Minimum 0 seconds
-        print("🔧 Chunking parameters updated:")
-        print("   - Max chunk duration: \(Int(maxChunkDuration)) seconds")
-        print("   - Chunk overlap: \(Int(chunkOverlap)) seconds")
+        let previousMaxDuration = maxChunkDuration
+        let previousOverlap = chunkOverlap
+        
+        maxChunkDuration = max(minChunkDuration, maxDuration)
+        chunkOverlap = max(0.0, overlap)
+        
+        // Only log if values actually changed
+        if previousMaxDuration != maxChunkDuration || previousOverlap != chunkOverlap {
+            print("🔧 Chunking parameters updated:")
+            print("   - Max chunk duration: \(Int(maxChunkDuration)) seconds" + 
+                  (maxDuration < minChunkDuration ? " (clamped from \(Int(maxDuration))s)" : ""))
+            print("   - Chunk overlap: \(Int(chunkOverlap)) seconds" + 
+                  (overlap < 0 ? " (clamped from \(Int(overlap))s)" : ""))
+        }
     }
     
     /// Gets the current chunking parameters
     /// - Returns: Tuple with max duration and overlap in seconds
     static func getChunkingParameters() -> (maxDuration: Double, overlap: Double) {
         return (maxDuration: maxChunkDuration, overlap: chunkOverlap)
+    }
+    
+    /// Configures Voice Activity Detection (VAD) settings
+    /// - Parameters:
+    ///   - enabled: Whether to use VAD for smart chunking
+    ///   - removeLeadingSilence: Whether to remove silence from chunks
+    ///   - energyThreshold: Energy threshold for speech detection (0.0-1.0)
+    ///   - minSpeechDuration: Minimum duration to consider as speech (seconds)
+    ///   - minSilenceDuration: Minimum duration to consider as silence (seconds)
+    static func setVADSettings(enabled: Bool? = nil,
+                              removeLeadingSilence: Bool? = nil,
+                              energyThreshold: Float? = nil,
+                              minSpeechDuration: Double? = nil,
+                              minSilenceDuration: Double? = nil) {
+        if let enabled = enabled {
+            useVADChunking = enabled
+            print("🎤 VAD chunking: \(enabled ? "ENABLED" : "DISABLED")")
+        }
+        
+        if let remove = removeLeadingSilence {
+            self.removeLeadingSilence = remove
+            print("🔇 Remove leading silence: \(remove ? "YES" : "NO")")
+        }
+        
+        if let threshold = energyThreshold {
+            vadEnergyThreshold = max(0.0, min(1.0, threshold))
+            print("📊 VAD energy threshold: \(vadEnergyThreshold)")
+        }
+        
+        if let speechDuration = minSpeechDuration {
+            vadMinSpeechDuration = max(0.1, speechDuration)
+            print("🗣️ Minimum speech duration: \(vadMinSpeechDuration)s")
+        }
+        
+        if let silenceDuration = minSilenceDuration {
+            vadMinSilenceDuration = max(0.1, silenceDuration)
+            print("🤫 Minimum silence duration: \(vadMinSilenceDuration)s")
+        }
+    }
+    
+    /// Gets the current VAD settings
+    /// - Returns: Tuple with all VAD settings
+    static func getVADSettings() -> (enabled: Bool, removeLeadingSilence: Bool, energyThreshold: Float, minSpeechDuration: Double, minSilenceDuration: Double) {
+        return (enabled: useVADChunking, 
+                removeLeadingSilence: removeLeadingSilence,
+                energyThreshold: vadEnergyThreshold,
+                minSpeechDuration: vadMinSpeechDuration,
+                minSilenceDuration: vadMinSilenceDuration)
     }
     
     /// Forces release of the current Whisper context for memory isolation between chunks
@@ -790,12 +1172,30 @@ struct WhisperTranscriptionService {
             return nil
         }
         
-        // Create audio chunks
-        guard let chunks = AudioConverter.createAudioChunks(from: audioURL, 
-                                                           maxDuration: maxChunkDuration, 
-                                                           overlap: chunkOverlap) else {
-            print("❌ Failed to create audio chunks")
-            return nil
+        // Create audio chunks (using VAD if enabled)
+        let chunks: [(samples: [Float], startTime: Double, endTime: Double)]
+        if useVADChunking {
+            guard let vadChunks = AudioConverter.createAudioChunksWithVAD(
+                from: audioURL,
+                maxDuration: maxChunkDuration,
+                vadEnabled: true,
+                removeLeadingSilence: removeLeadingSilence
+            ) else {
+                print("❌ Failed to create VAD-based audio chunks")
+                return nil
+            }
+            // Convert VAD chunks to standard chunk format for compatibility
+            chunks = vadChunks.map { ($0.samples, $0.startTime, $0.endTime) }
+        } else {
+            guard let standardChunks = AudioConverter.createAudioChunks(
+                from: audioURL,
+                maxDuration: maxChunkDuration,
+                overlap: chunkOverlap
+            ) else {
+                print("❌ Failed to create audio chunks")
+                return nil
+            }
+            chunks = standardChunks
         }
         
         // Configure parameters
@@ -875,14 +1275,28 @@ struct WhisperTranscriptionService {
             
             let trimmedChunk = chunkTranscription.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedChunk.isEmpty {
+                // Log the full chunk transcription
+                #if DEBUG
+                print("📄 Chunk \(index + 1) RAW transcription:")
+                print("   Text: \"\(trimmedChunk)\"")
+                print("   Length: \(trimmedChunk.count) characters")
+                print("   Word count: \(trimmedChunk.split(separator: " ").count) words")
+                #else
+                print("📄 Chunk \(index + 1): \(trimmedChunk.count) chars, \(trimmedChunk.split(separator: " ").count) words")
+                #endif
+                
                 // Apply overlap filtering for chunks after the first one
                 if index > 0 && !combinedTranscription.isEmpty {
                     let filteredChunk = removeOverlapFromChunk(trimmedChunk, previousChunk: combinedTranscription.last ?? "")
+                    print("📝 Chunk \(index + 1) FILTERED transcription:")
+                    print("   Text: \"\(filteredChunk)\"")
+                    print("   Length: \(filteredChunk.count) characters")
+                    print("   Word count: \(filteredChunk.split(separator: " ").count) words")
                     combinedTranscription.append(filteredChunk)
                 } else {
                     combinedTranscription.append(trimmedChunk)
                 }
-                print("✅ Chunk \(index + 1) processed successfully (\(trimmedChunk.count) characters)")
+                print("✅ Chunk \(index + 1) processed successfully")
             } else {
                 print("⚠️ Chunk \(index + 1) produced no transcription")
             }
@@ -898,7 +1312,12 @@ struct WhisperTranscriptionService {
         }
         
         let finalResult = combinedTranscription.joined(separator: " ")
-        print("✅ Combined transcription complete (\(finalResult.count) characters total)")
+        print("✅ Combined transcription complete")
+        print("📊 FINAL TRANSCRIPTION SUMMARY:")
+        print("   Total chunks processed: \(chunks.count)")
+        print("   Total characters: \(finalResult.count)")
+        print("   Total words: \(finalResult.split(separator: " ").count)")
+        print("   Result preview: \"\(finalResult.prefix(200))...\"")
         
         return finalResult.isEmpty ? nil : finalResult
     }
@@ -917,12 +1336,19 @@ struct WhisperTranscriptionService {
             let previousEnd = Array(prevWords.suffix(overlapLength))
             
             if currentStart.map(String.init) == previousEnd.map(String.init) {
-                print("🔄 Detected \(overlapLength)-word overlap, removing from current chunk")
+                let overlapText = currentStart.joined(separator: " ")
+                print("🔄 Detected \(overlapLength)-word overlap: \"\(overlapText)\"")
+                print("   Previous chunk end: \"\(previousEnd.joined(separator: " "))\"")
+                print("   Current chunk start: \"\(currentStart.joined(separator: " "))\"")
+                print("   Removing overlap from current chunk")
                 let filteredWords = Array(words.dropFirst(overlapLength))
-                return filteredWords.joined(separator: " ")
+                let filteredText = filteredWords.joined(separator: " ")
+                print("   Result after filtering: \"\(filteredText.prefix(100))...\"")
+                return filteredText
             }
         }
         
+        print("🔄 No overlap detected between chunks")
         return currentChunk
     }
     
@@ -946,12 +1372,30 @@ struct WhisperTranscriptionService {
             return nil
         }
         
-        // Create audio chunks
-        guard let chunks = AudioConverter.createAudioChunks(from: audioURL, 
-                                                           maxDuration: maxChunkDuration, 
-                                                           overlap: chunkOverlap) else {
-            print("❌ Failed to create audio chunks")
-            return nil
+        // Create audio chunks (using VAD if enabled)
+        let vadChunks: [(samples: [Float], startTime: Double, endTime: Double, originalStartTime: Double)]
+        if useVADChunking {
+            guard let vChunks = AudioConverter.createAudioChunksWithVAD(
+                from: audioURL,
+                maxDuration: maxChunkDuration,
+                vadEnabled: true,
+                removeLeadingSilence: removeLeadingSilence
+            ) else {
+                print("❌ Failed to create VAD-based audio chunks")
+                return nil
+            }
+            vadChunks = vChunks
+        } else {
+            guard let standardChunks = AudioConverter.createAudioChunks(
+                from: audioURL,
+                maxDuration: maxChunkDuration,
+                overlap: chunkOverlap
+            ) else {
+                print("❌ Failed to create audio chunks")
+                return nil
+            }
+            // Convert standard chunks to VAD chunk format with identical timing
+            vadChunks = standardChunks.map { ($0.samples, $0.startTime, $0.endTime, $0.startTime) }
         }
         
         // Configure parameters with timestamps enabled
@@ -989,8 +1433,8 @@ struct WhisperTranscriptionService {
         var allSegments: [TranscriptionSegment] = []
         
         // Process each chunk
-        for (index, chunk) in chunks.enumerated() {
-            print("🔄 Processing chunk \(index + 1)/\(chunks.count) for timestamps (\(String(format: "%.1f", chunk.startTime))s - \(String(format: "%.1f", chunk.endTime))s)")
+        for (index, chunk) in vadChunks.enumerated() {
+            print("🔄 Processing chunk \(index + 1)/\(vadChunks.count) for timestamps (\(String(format: "%.1f", chunk.startTime))s - \(String(format: "%.1f", chunk.endTime))s)")
             
             // Create isolated context for each chunk to prevent state interference
             let currentContext: OpaquePointer
@@ -1025,14 +1469,18 @@ struct WhisperTranscriptionService {
             let numSegments = whisper_full_n_segments(currentContext)
             var chunkSegments: [TranscriptionSegment] = []
             
+            print("📄 Chunk \(index + 1) RAW segments (\(numSegments) segments):")
+            
             for i in 0..<numSegments {
                 let text = String(cString: whisper_full_get_segment_text(currentContext, i))
                 let segmentStartTime = Double(whisper_full_get_segment_t0(currentContext, i)) / 100.0  // Convert to seconds
                 let segmentEndTime = Double(whisper_full_get_segment_t1(currentContext, i)) / 100.0    // Convert to seconds
                 
                 // Adjust timestamps to account for chunk offset
-                let adjustedStartTime = chunk.startTime + segmentStartTime
-                let adjustedEndTime = chunk.startTime + segmentEndTime
+                // When VAD removes silence, we need to use originalStartTime for proper timeline alignment
+                let timeOffset = chunk.originalStartTime
+                let adjustedStartTime = timeOffset + segmentStartTime
+                let adjustedEndTime = timeOffset + segmentEndTime
                 
                 let segment = TranscriptionSegment(
                     startTime: adjustedStartTime,
@@ -1040,17 +1488,36 @@ struct WhisperTranscriptionService {
                     text: text
                 )
                 chunkSegments.append(segment)
+                
+                // Log each segment
+                print("   Segment \(i + 1): [\(String(format: "%.2f", adjustedStartTime))s-\(String(format: "%.2f", adjustedEndTime))s] \"\(text)\"")
             }
+            
+            // Log combined chunk text
+            let chunkText = chunkSegments.map { $0.text }.joined(separator: " ")
+            print("📄 Chunk \(index + 1) COMBINED text:")
+            print("   Text: \"\(chunkText)\"")
+            print("   Total length: \(chunkText.count) characters")
+            print("   Total word count: \(chunkText.split(separator: " ").count) words")
             
             // Filter overlapping segments for chunks after the first one
             if index > 0 && !allSegments.isEmpty {
                 let filteredSegments = removeOverlappingSegments(chunkSegments, previousSegments: allSegments)
+                print("📝 Chunk \(index + 1) FILTERED segments (\(filteredSegments.count) segments):")
+                for (i, segment) in filteredSegments.enumerated() {
+                    print("   Filtered Segment \(i + 1): [\(String(format: "%.2f", segment.startTime))s-\(String(format: "%.2f", segment.endTime))s] \"\(segment.text)\"")
+                }
+                let filteredText = filteredSegments.map { $0.text }.joined(separator: " ")
+                print("📝 Chunk \(index + 1) FILTERED combined text:")
+                print("   Text: \"\(filteredText)\"")
+                print("   Length: \(filteredText.count) characters")
+                print("   Word count: \(filteredText.split(separator: " ").count) words")
                 allSegments.append(contentsOf: filteredSegments)
             } else {
                 allSegments.append(contentsOf: chunkSegments)
             }
             
-            print("✅ Chunk \(index + 1) processed successfully (\(chunkSegments.count) segments)")
+            print("✅ Chunk \(index + 1) processed successfully")
             
             // Free isolated context immediately after processing this chunk
             if resetContextBetweenChunks {
@@ -1062,7 +1529,18 @@ struct WhisperTranscriptionService {
             }
         }
         
-        print("✅ Combined timestamp transcription complete (\(allSegments.count) segments total)")
+        print("✅ Combined timestamp transcription complete")
+        print("📊 FINAL TIMESTAMP TRANSCRIPTION SUMMARY:")
+        print("   Total chunks processed: \(vadChunks.count)")
+        print("   Total segments: \(allSegments.count)")
+        let totalText = allSegments.map { $0.text }.joined(separator: " ")
+        print("   Total characters: \(totalText.count)")
+        print("   Total words: \(totalText.split(separator: " ").count)")
+        if let firstSegment = allSegments.first, let lastSegment = allSegments.last {
+            print("   Time range: \(String(format: "%.2f", firstSegment.startTime))s - \(String(format: "%.2f", lastSegment.endTime))s")
+            print("   Total duration: \(String(format: "%.2f", lastSegment.endTime - firstSegment.startTime))s")
+        }
+        print("   Result preview: \"\(totalText.prefix(200))...\"")
         
         return allSegments.isEmpty ? nil : allSegments
     }
@@ -1085,10 +1563,18 @@ struct WhisperTranscriptionService {
         for segment in currentSegments {
             // Skip segments that are too close to the end of the previous chunk
             let timeDifference = segment.startTime - lastPreviousSegment.endTime
-            if timeDifference > overlapThreshold || !segmentsHaveTextOverlap(segment, lastPreviousSegment) {
+            let hasTextOverlap = segmentsHaveTextOverlap(segment, lastPreviousSegment)
+            
+            if timeDifference > overlapThreshold || !hasTextOverlap {
                 filteredSegments.append(segment)
+                print("✅ Keeping segment: [\(String(format: "%.2f", segment.startTime))s] \"\(segment.text.prefix(50))...\"")
+                print("   Time difference: \(String(format: "%.2f", timeDifference))s (threshold: \(String(format: "%.2f", overlapThreshold))s)")
+                print("   Text overlap: \(hasTextOverlap ? "YES" : "NO")")
             } else {
-                print("🔄 Skipping overlapping segment: '\(segment.text.prefix(30))...'")
+                print("🔄 Skipping overlapping segment: [\(String(format: "%.2f", segment.startTime))s] \"\(segment.text.prefix(30))...\"")
+                print("   Time difference: \(String(format: "%.2f", timeDifference))s (threshold: \(String(format: "%.2f", overlapThreshold))s)")
+                print("   Text overlap: \(hasTextOverlap ? "YES" : "NO")")
+                print("   Previous segment: [\(String(format: "%.2f", lastPreviousSegment.endTime))s] \"\(lastPreviousSegment.text.prefix(30))...\"")
             }
         }
         
