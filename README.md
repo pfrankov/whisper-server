@@ -1,4 +1,4 @@
-# WhisperServer
+# WhisperServer MacOS
 
 <img src="https://github.com/user-attachments/assets/bf882d55-f1f6-4765-9124-e2cb351eabe0" alt="Demo" width="500"/>
 
