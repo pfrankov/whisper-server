@@ -1,5 +1,5 @@
 import Foundation
-import Combine // For status updates later
+import Combine
 
 /// Protocol for providing model paths, allowing different implementations
 protocol ModelPathProvider {
@@ -32,30 +32,21 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
         didSet {
             UserDefaults.standard.set(selectedModelID, forKey: "selectedModelID")
             // Trigger notification when selection changes
-            NotificationCenter.default.post(name: NSNotification.Name("ModelManagerDidUpdate"), object: self)
-            print("Selected model changed to: \(selectedModelID ?? "None")")
+            NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
             checkAndPrepareSelectedModel() // Check/download when selection changes
         }
     }
     
-    /// Имя выбранной модели, для отображения в интерфейсе и логирования
+    /// Name of the selected model for UI display and logging
     var selectedModelName: String? {
         guard let modelID = selectedModelID else { return nil }
         return availableModels.first(where: { $0.id == modelID })?.name
     }
     
     @Published private(set) var currentStatus: String = "Initializing..." {
-        didSet {
-            // Post notification when status changes
-            NotificationCenter.default.post(name: NSNotification.Name("ModelManagerStatusChanged"), object: self)
-        }
+        didSet { NotificationCenter.default.post(name: .modelManagerStatusChanged, object: self) }
     }
-    @Published private(set) var downloadProgress: Double? = nil { // Optional progress (0.0 to 1.0)
-        didSet {
-            // Post notification when download progress changes
-            NotificationCenter.default.post(name: NSNotification.Name("ModelManagerProgressChanged"), object: self)
-        }
-    }
+    @Published private(set) var downloadProgress: Double? = nil { didSet { NotificationCenter.default.post(name: .modelManagerProgressChanged, object: self) } }
     
     /// Flag to indicate if model is ready for use
     @Published private(set) var isModelReady: Bool = false
@@ -79,27 +70,20 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
     // MARK: - Initialization
 
     init() {
-        // Initialize URLSession for downloads
         let configuration = URLSessionConfiguration.default
-        // Allow downloads over cellular if needed (optional)
-        // configuration.allowsCellularAccess = true
-        self.urlSession = URLSession(configuration: configuration, delegate: nil, delegateQueue: OperationQueue()) // Use background queue
+        self.urlSession = URLSession(configuration: configuration, delegate: nil, delegateQueue: OperationQueue())
 
         setupModelsDirectory()
         loadModelDefinitions()
-        // Load saved selection or default to first model
         selectedModelID = UserDefaults.standard.string(forKey: "selectedModelID") ?? availableModels.first?.id
-        print("Initial selected model ID: \(selectedModelID ?? "None")")
-        // Post notification after initialization
-        NotificationCenter.default.post(name: NSNotification.Name("ModelManagerDidUpdate"), object: self)
-        checkAndPrepareSelectedModel() // Check/download on initial load
+        NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
+        checkAndPrepareSelectedModel()
     }
 
     // MARK: - Public Methods
 
     func selectModel(id: String) {
         guard availableModels.contains(where: { $0.id == id }) else {
-            print("Error: Attempted to select unknown model ID: \(id)")
             return
         }
         selectedModelID = id
@@ -109,7 +93,6 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
 
     private func setupModelsDirectory() {
         guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            print("Error: Could not find Application Support directory.")
             currentStatus = "Error: Cannot access Application Support"
             return
         }
@@ -121,9 +104,7 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
 
         do {
             try fileManager.createDirectory(at: modelsDirectory, withIntermediateDirectories: true, attributes: nil)
-            print("Models directory ensured at: \(modelsDirectory.path)")
         } catch {
-            print("Error creating models directory: \(error)")
             currentStatus = "Error: Cannot create models directory"
             self.modelsDirectory = nil // Prevent further operations if directory failed
         }
@@ -131,7 +112,6 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
 
     private func loadModelDefinitions() {
         guard let url = Bundle.main.url(forResource: "Models", withExtension: "json") else {
-            print("Error: Models.json not found in bundle.")
             currentStatus = "Error: Models.json missing"
             return
         }
@@ -139,10 +119,8 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
         do {
             let data = try Data(contentsOf: url)
             availableModels = try JSONDecoder().decode([Model].self, from: data)
-            print("Loaded \(availableModels.count) model definitions.")
             currentStatus = "Ready" // Initial status after loading JSON
         } catch {
-            print("Error loading or decoding Models.json: \(error)")
             currentStatus = "Error: Invalid Models.json"
             availableModels = []
         }
@@ -155,21 +133,16 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
               let model = availableModels.first(where: { $0.id == selectedID }),
               let modelsDir = modelsDirectory else {
             currentStatus = selectedModelID == nil ? "No model selected" : "Error: Cannot prepare model"
-            print("Cannot prepare model - missing selection, definition, or directory.")
             isModelReady = false
-            NotificationCenter.default.post(name: NSNotification.Name("ModelPreparationFailed"), object: self)
+            NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
             return
         }
 
         // Prevent duplicate calls
-        if isPreparingModel {
-            print("⏳ Model preparation already in progress for \(model.name), skipping duplicate call")
-            return
-        }
+        if isPreparingModel { return }
         
         isPreparingModel = true
         currentStatus = "Checking model: \(model.name)"
-        print("Checking files for model: \(model.name)")
         isModelReady = false
 
         Task { // Use Task for async operations
@@ -178,27 +151,24 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
 
                 if filesExist {
                     currentStatus = "Model '\(model.name)' is ready."
-                    print("All files for model \(model.name) exist locally.")
                     isModelReady = true
                     isPreparingModel = false // Reset flag
-                    NotificationCenter.default.post(name: NSNotification.Name("ModelIsReady"), object: self)
+                    NotificationCenter.default.post(name: .modelIsReady, object: self)
                 } else {
                     currentStatus = "Downloading model: \(model.name)..."
-                    print("Need to download files for model \(model.name)")
                     // Clear any previous progress
                     self.downloadProgress = 0.0
                     try await downloadAndPrepareModel(model: model, directory: modelsDir)
                     // After successful download, model is ready
                     isModelReady = true
                     isPreparingModel = false // Reset flag
-                    NotificationCenter.default.post(name: NSNotification.Name("ModelIsReady"), object: self)
+                    NotificationCenter.default.post(name: .modelIsReady, object: self)
                 }
             } catch {
                 currentStatus = "Error checking model files: \(error.localizedDescription)"
-                print("Error checking model files: \(error)")
                 isModelReady = false
                 isPreparingModel = false // Reset flag on error
-                NotificationCenter.default.post(name: NSNotification.Name("ModelPreparationFailed"), object: self)
+                NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
             }
         }
     }
@@ -344,7 +314,7 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
              self?.downloadProgress = nil
              print("✅ Model \(model.name) preparation complete.")
              self?.isModelReady = true
-             NotificationCenter.default.post(name: NSNotification.Name("ModelIsReady"), object: self)
+             NotificationCenter.default.post(name: .modelIsReady, object: self)
          }
     }
 
@@ -655,45 +625,33 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
     
     func getPathsForSelectedModel() -> (binPath: URL, encoderDir: URL)? {
         guard let selectedID = selectedModelID else {
-            print("📋 Model Manager: No model selected")
             return nil
         }
         
         guard let model = availableModels.first(where: { $0.id == selectedID }) else {
-            print("📋 Model Manager: Selected model ID '\(selectedID)' not found in available models")
             return nil
         }
         
         guard let modelsDir = modelsDirectory else {
-            print("📋 Model Manager: Models directory not available")
             return nil
         }
-        
-        print("📋 Model Manager: Getting paths for selected model: \(model.name) (ID: \(model.id))")
-        print("📋 Model Manager: Models directory: \(modelsDir.path)")
 
         var binPath: URL?
         var encoderDir: URL?
 
         for fileInfo in model.files {
             let localURL = modelsDir.appendingPathComponent(fileInfo.filename)
-            print("📋 Model Manager: Checking file: \(fileInfo.filename) (type: \(fileInfo.type))")
             
             if fileInfo.type == "bin" {
                 // First try a more direct approach to check if the file exists
                 let fileExists = fileManager.fileExists(atPath: localURL.path)
-                print("📋 Model Manager: File exists check: \(fileExists)")
                 
                 // Get more detailed information
                 do {
                     let resourceValues = try localURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey])
-                    print("📋 Model Manager: Is directory: \(resourceValues.isDirectory ?? false)")
-                    print("📋 Model Manager: Is regular file: \(resourceValues.isRegularFile ?? false)")
-                    if let fileSize = resourceValues.fileSize {
-                        print("📋 Model Manager: File size: \(fileSize) bytes")
-                    }
+                    _ = resourceValues
                 } catch {
-                    print("📋 Model Manager: Error getting resource values: \(error)")
+                    // Ignore detailed resource errors here
                 }
                 
                 if fileExists {
@@ -705,21 +663,9 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
                         try fileHandle.close()
                         
                         if header != nil && !header!.isEmpty {
-                            print("📋 Model Manager: Successfully read file header")
                             binPath = localURL
-                        } else {
-                            print("📋 Model Manager: Warning - File exists but couldn't read header")
                         }
                     } catch {
-                        print("📋 Model Manager: Error verifying bin file: \(error)")
-                        
-                        // If we can't verify the file, let's see what's actually at this path
-                        let enumerator = fileManager.enumerator(atPath: modelsDir.path)
-                        print("📋 Model Manager: Contents of models directory:")
-                        while let element = enumerator?.nextObject() as? String {
-                            print("📋 Model Manager: - \(element)")
-                        }
-                        
                         return nil
                     }
                 } else {
@@ -729,17 +675,15 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
                         let directoryContents = try fileManager.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: nil)
                         for item in directoryContents {
                             if item.lastPathComponent.contains(baseName) {
-                                print("📋 Model Manager: Found alternative file: \(item.path)")
                                 binPath = item
                                 break
                             }
                         }
                     } catch {
-                        print("📋 Model Manager: Error listing directory: \(error)")
+                        // Ignore directory listing errors here
                     }
                     
                     if binPath == nil {
-                        print("📋 Model Manager: Error - Expected bin file not found at: \(localURL.path)")
                         return nil
                     }
                 }
@@ -749,19 +693,14 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
                 var isDirectory: ObjCBool = false
                 
                 if fileManager.fileExists(atPath: unzippedURL.path, isDirectory: &isDirectory) && isDirectory.boolValue {
-                    print("📋 Model Manager: Found encoder directory at: \(unzippedURL.path)")
-                    
                     // Additional verification - check if it has content
                     do {
                         let contents = try fileManager.contentsOfDirectory(atPath: unzippedURL.path)
-                        print("📋 Model Manager: Encoder directory contains \(contents.count) items")
                         if !contents.isEmpty {
                             encoderDir = unzippedURL
-                        } else {
-                            print("📋 Model Manager: Warning - Directory is empty")
                         }
                     } catch {
-                        print("📋 Model Manager: Warning - Failed to list directory contents: \(error)")
+                        // Ignore listing errors; we'll fall back below
                     }
                 } else {
                     // Check if the directory might be at a different location
@@ -771,18 +710,16 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
                             var isDir: ObjCBool = false
                             if fileManager.fileExists(atPath: item.path, isDirectory: &isDir) && isDir.boolValue {
                                 if item.lastPathComponent.contains("encoder") || item.lastPathComponent.contains("mlmodelc") {
-                                    print("📋 Model Manager: Found potential encoder directory at: \(item.path)")
                                     encoderDir = item
                                     break
                                 }
                             }
                         }
                     } catch {
-                        print("📋 Model Manager: Error listing directory for encoder dir: \(error)")
+                        // Ignore listing errors here
                     }
                     
                     if encoderDir == nil {
-                        print("📋 Model Manager: Error - Expected unzipped encoder directory not found at: \(unzippedURL.path)")
                         return nil
                     }
                 }
@@ -791,23 +728,16 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
 
         // Ensure both paths were found
         if binPath == nil {
-            print("📋 Model Manager: Error - Bin path not found for model \(model.id)")
             return nil
         }
         
         if encoderDir == nil {
-            print("📋 Model Manager: Error - Encoder directory not found for model \(model.id)")
             return nil
         }
         
         guard let binPathValue = binPath, let encoderDirValue = encoderDir else {
-            print("📋 Model Manager: Error - Could not find both required paths for model \(model.id)")
             return nil
         }
-
-        print("📋 Model Manager: Successfully found model paths:")
-        print("📋 Model Manager: - Bin path: \(binPathValue.path)")
-        print("📋 Model Manager: - Encoder dir: \(encoderDirValue.path)")
         return (binPathValue, encoderDirValue)
     }
-} 
+}

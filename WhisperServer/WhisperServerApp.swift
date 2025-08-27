@@ -6,9 +6,7 @@
 //
 
 import SwiftUI
-#if os(macOS) || os(iOS)
 import Metal
-#endif
 import Vapor
 
 @main
@@ -100,7 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             print("🔄 Starting Metal shader preloading...")
             
-            // Запуск прекомпиляции шейдеров
+            // Start shader precompilation
             var success = false
             
             // modelManager is a non-optional property, so we don't need to check if it's nil
@@ -117,11 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 print("❌ Could not get model paths from ModelManager")
             }
             
-            // UI обновления всегда на главном потоке
+            // Always perform UI updates on the main thread
             DispatchQueue.main.async {
                 self.isPreloadingShaders = false
                 
-                // Замеряем время выполнения
+                // Measure elapsed time
                 let elapsedTime = Date().timeIntervalSince(startTime)
                 let formattedTime = String(format: "%.2f", elapsedTime)
                 
@@ -129,13 +127,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.preloadStatusText = "Shader compilation finished successfully in \(formattedTime) sec."
                     print("✅ Metal shader preloading completed in \(formattedTime) seconds")
                     
-                    // Обновляем статус Metal в интерфейсе на "Ready"
+                    // Update the Metal status in the UI to "Ready"
                     self.updateStatusMenuItem(metalCaching: false, failed: false)
                 } else {
                     self.preloadStatusText = "Shader compilation error"
                     print("❌ Metal shader preloading failed after \(formattedTime) seconds")
                     
-                    // Обновляем статус Metal в интерфейсе как "Failed"
+                    // Update the Metal status in the UI as "Failed"
                     self.updateStatusMenuItem(metalCaching: false, failed: true)
                 }
             }
@@ -145,36 +143,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Setup notification observers for model manager events
     private func setupNotificationObservers() {
         // Model is ready notification
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleModelReady),
-            name: NSNotification.Name("ModelIsReady"),
-            object: nil
-        )
+        NotificationCenter.default.addObserver(self, selector: #selector(handleModelReady), name: .modelIsReady, object: nil)
         
         // Model preparation failed notification
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleModelPreparationFailed),
-            name: NSNotification.Name("ModelPreparationFailed"),
-            object: nil
-        )
+        NotificationCenter.default.addObserver(self, selector: #selector(handleModelPreparationFailed), name: .modelPreparationFailed, object: nil)
         
         // Model manager status changed notification
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleModelStatusChanged),
-            name: NSNotification.Name("ModelManagerStatusChanged"),
-            object: nil
-        )
+        NotificationCenter.default.addObserver(self, selector: #selector(handleModelStatusChanged), name: .modelManagerStatusChanged, object: nil)
         
         // Model manager progress changed notification
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleModelProgressChanged),
-            name: NSNotification.Name("ModelManagerProgressChanged"),
-            object: nil
-        )
+        NotificationCenter.default.addObserver(self, selector: #selector(handleModelProgressChanged), name: .modelManagerProgressChanged, object: nil)
         
         // Metal is activated on the first request
         NotificationCenter.default.addObserver(
@@ -185,12 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         
         // Tiny model was auto-selected
-        NotificationCenter.default.addObserver(
-            self, 
-            selector: #selector(handleTinyModelAutoSelected),
-            name: NSNotification.Name("TinyModelAutoSelected"), 
-            object: nil
-        )
+        NotificationCenter.default.addObserver(self, selector: #selector(handleTinyModelAutoSelected), name: .tinyModelAutoSelected, object: nil)
     }
     
     /// Update UI to reflect model preparation
@@ -206,14 +179,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             
             self.lastUIUpdatedModelID = currentModelID
             
-            // Сбрасываем статус Metal на "неактивно" при смене модели
+            // Reset Metal status to inactive on model change
             let selectedModel = self.modelManager.selectedModelName ?? "Unknown"
             print("🔄 Resetting Metal status while preparing model: \(selectedModel)")
             
             if let item = self.statusItem, let button = item.button {
                 button.image = NSImage(systemSymbolName: "sleep", accessibilityDescription: "Sleep")
                 
-                // Обновляем текст в меню
+                // Update the text in the menu
                 if let statusMenuItem = self.statusItem.menu?.item(withTag: MenuItemTags.status.rawValue) {
                     statusMenuItem.title = "Inactive (will initialize on first request)"
                     statusMenuItem.image = NSImage(systemSymbolName: "sleep", accessibilityDescription: "Sleep")
@@ -481,7 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
         
         // Subscribe to model manager updates to refresh the menu when needed
-        NotificationCenter.default.addObserver(self, selector: #selector(refreshModelSelectionMenu), name: NSNotification.Name("ModelManagerDidUpdate"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshModelSelectionMenu), name: .modelManagerDidUpdate, object: nil)
         
         // Update UI
         self.updateUIForModelPreparation()
@@ -506,7 +479,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // If server isn't running, start it
         if let server = vaporServer, !server.isRunning {
             server.start()
-            // The Vapor server starts asynchronously. We need to wait a bit before updating the UI.
+            // Update immediately and also recheck shortly after boot
+            self.updateServerStatusMenuItem()
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.updateServerStatusMenuItem()
             }
@@ -529,11 +503,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let menu = self.statusItem.menu, let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) {
                 if let server = self.vaporServer, server.isRunning {
                     serverItem.title = "Server: Running on port \(self.serverPort)"
-                    serverItem.state = .on
+                    serverItem.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
                 } else {
                     serverItem.title = "Server: Stopped"
-                    serverItem.state = .off
+                    serverItem.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
                 }
+                serverItem.state = .off // Avoid checkmark column shifting the menu
             }
         }
     }
@@ -543,28 +518,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func selectModel(_ sender: NSMenuItem) {
         guard let modelId = sender.representedObject as? String else { return }
         
-        // Проверяем, изменился ли выбор модели
+        // Check whether the model selection changed
         if modelId != modelManager.selectedModelID {
-            // Получаем имя модели для логирования
+            // Get model name for logging
             let modelName = modelManager.availableModels.first(where: { $0.id == modelId })?.name ?? "Unknown"
             print("🔄 Changing model to: \(modelName) (id: \(modelId))")
             
-            // Останавливаем сервер перед сменой модели
+            // Stop the server before changing the model
             stopServer()
             
-            // Меняем модель
+            // Change the model
             modelManager.selectModel(id: modelId)
             
-            // Перерисовываем меню
+            // Refresh the menu
             refreshModelSelectionMenu()
             
-            // Освобождаем контекст Whisper, чтобы он был переинициализирован
+            // Release the Whisper context so it will be reinitialized
             WhisperTranscriptionService.reinitializeContext()
             
-            // Обновляем UI, чтобы показать, что мы ожидаем подготовки новой модели
+            // Update the UI to show we are preparing the new model
             updateUIForModelPreparation()
             
-            // Сразу запускаем сервер после смены модели
+            // Start the server immediately after changing the model
             startServer()
         }
     }
@@ -605,4 +580,3 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(self)
     }
 }
-

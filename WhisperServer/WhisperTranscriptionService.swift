@@ -1,11 +1,6 @@
 import Foundation
 import whisper
-#if os(macOS) || os(iOS)
-import SwiftUI
-import AVFoundation
 import Darwin
-import AppKit
-#endif
 
 /// Audio transcription service using whisper.cpp
 struct WhisperTranscriptionService {
@@ -18,7 +13,7 @@ struct WhisperTranscriptionService {
     // MARK: - Constants
     
     /// Notification name for when Metal is activated
-    static let metalActivatedNotificationName = WhisperContextManager.metalActivatedNotificationName
+    static let metalActivatedNotificationName = Notification.Name.whisperMetalActivated
     
     // MARK: Audio Processing Constants
     private static let defaultMaxChunkDuration = 30.0 // Only used for traditional chunking when VAD is disabled
@@ -103,7 +98,6 @@ struct WhisperTranscriptionService {
             finalModelPaths = (binPath, encoderDir)
         } else {
             // Fallback to getting paths from a temporary ModelManager instance
-            print("🔄 Attempting to get paths from ModelManager...")
             let modelManager = ModelManager()
             finalModelPaths = modelManager.getModelPaths()
         }
@@ -116,8 +110,6 @@ struct WhisperTranscriptionService {
     ///                     When false, all chunks share the same context (faster, uses less memory, but may have state interference)
     static func setContextIsolationEnabled(_ enabled: Bool) {
         resetContextBetweenChunks = enabled
-        print("🔧 Context isolation between chunks: \(enabled ? "ENABLED" : "DISABLED")")
-        print("   - \(enabled ? "Each chunk gets isolated context (more memory, no state interference)" : "Chunks share context (less memory, potential state interference)")")
     }
     
     /// Gets the current context isolation setting
@@ -138,14 +130,7 @@ struct WhisperTranscriptionService {
         chunkOverlap = max(0.0, overlap)
         
         // Only log if values actually changed
-        if previousMaxDuration != maxChunkDuration || previousOverlap != chunkOverlap {
-            print("🔧 Chunking parameters updated (affects only traditional chunking when VAD is disabled):")
-            print("   - Max traditional chunk duration: \(Int(maxChunkDuration)) seconds" + 
-                  (maxDuration < 10.0 ? " (clamped from \(Int(maxDuration))s to minimum 10s)" : ""))
-            print("   - Traditional chunk overlap: \(Int(chunkOverlap)) seconds" + 
-                  (overlap < 0 ? " (clamped from \(Int(overlap))s)" : ""))
-            print("   - Note: When VAD is enabled, each speech segment becomes its own chunk (no limits)")
-        }
+        _ = (previousMaxDuration, previousOverlap)
     }
     
     /// Gets the current chunking parameters
@@ -166,30 +151,15 @@ struct WhisperTranscriptionService {
                               energyThreshold: Float? = nil,
                               minSpeechDuration: Double? = nil,
                               minSilenceDuration: Double? = nil) {
-        if let enabled = enabled {
-            useVADChunking = enabled
-            print("🎤 VAD chunking: \(enabled ? "ENABLED" : "DISABLED")")
-        }
+        if let enabled = enabled { useVADChunking = enabled }
         
-        if let remove = removeLeadingSilence {
-            self.removeLeadingSilence = remove
-            print("🔇 Remove leading silence: \(remove ? "YES" : "NO")")
-        }
+        if let remove = removeLeadingSilence { self.removeLeadingSilence = remove }
         
-        if let threshold = energyThreshold {
-            vadEnergyThreshold = max(0.0, min(1.0, threshold))
-            print("📊 VAD energy threshold: \(vadEnergyThreshold)")
-        }
+        if let threshold = energyThreshold { vadEnergyThreshold = max(0.0, min(1.0, threshold)) }
         
-        if let speechDuration = minSpeechDuration {
-            vadMinSpeechDuration = max(0.1, speechDuration)
-            print("🗣️ Minimum speech duration: \(vadMinSpeechDuration)s")
-        }
+        if let speechDuration = minSpeechDuration { vadMinSpeechDuration = max(0.1, speechDuration) }
         
-        if let silenceDuration = minSilenceDuration {
-            vadMinSilenceDuration = max(0.1, silenceDuration)
-            print("🤫 Minimum silence duration: \(vadMinSilenceDuration)s")
-        }
+        if let silenceDuration = minSilenceDuration { vadMinSilenceDuration = max(0.1, silenceDuration) }
     }
     
     /// Gets the current VAD settings
@@ -212,40 +182,8 @@ struct WhisperTranscriptionService {
     ///   - modelPaths: Optional model paths to use for initialization if context doesn't exist
     /// - Returns: String with transcription result or nil in case of error
     static func transcribeAudio(at audioURL: URL, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> String? {
-        // Get or initialize context (we create isolated contexts for each chunk)
-        guard WhisperContextManager.getOrCreateContext(modelPaths: modelPaths) != nil else {
-            print("❌ Failed to get or create Whisper context.")
-            return nil
-        }
-        
-        // Create audio chunks (using VAD if enabled)
-        let chunks: [(samples: [Float], startTime: Double, endTime: Double)]
-        if useVADChunking {
-            guard let vadChunks = WhisperAudioConverter.createAudioChunksWithVAD(
-                from: audioURL,
-                vadEnabled: true,
-                removeLeadingSilence: removeLeadingSilence,
-                vadEnergyThreshold: vadEnergyThreshold,
-                vadMinSpeechDuration: vadMinSpeechDuration,
-                vadMinSilenceDuration: vadMinSilenceDuration
-            ) else {
-                print("❌ Failed to create VAD-based audio chunks")
-                return nil
-            }
-            // Convert VAD chunks to standard chunk format for compatibility
-            chunks = vadChunks.map { ($0.samples, $0.startTime, $0.endTime) }
-        } else {
-            guard let standardChunks = WhisperAudioConverter.createAudioChunks(
-                from: audioURL,
-                maxDuration: maxChunkDuration,
-                overlap: chunkOverlap
-            ) else {
-                print("❌ Failed to create audio chunks")
-                return nil
-            }
-            chunks = standardChunks
-        }
-        
+        guard WhisperContextManager.getOrCreateContext(modelPaths: modelPaths) != nil else { return nil }
+        guard let chunks = makeChunks(from: audioURL) else { return nil }
         return processChunks(chunks, language: language, prompt: prompt, modelPaths: modelPaths)
     }
     
@@ -257,14 +195,13 @@ struct WhisperTranscriptionService {
     ///   - modelPaths: Optional model paths to use for initialization if context doesn't exist
     /// - Returns: Array of segments with timestamps or nil in case of error
     static func transcribeAudioToSegments(at audioURL: URL, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> [TranscriptionSegment]? {
-        // Get or initialize context
-        guard WhisperContextManager.getOrCreateContext(modelPaths: modelPaths) != nil else {
-            print("❌ Failed to get or create Whisper context.")
-            return nil
-        }
-        
-        // Create audio chunks (using VAD if enabled)
-        let chunks: [(samples: [Float], startTime: Double, endTime: Double)]
+        guard WhisperContextManager.getOrCreateContext(modelPaths: modelPaths) != nil else { return nil }
+        guard let chunks = makeChunks(from: audioURL) else { return nil }
+        return processChunksToSegments(chunks, language: language, prompt: prompt, modelPaths: modelPaths)
+    }
+
+    /// Returns audio chunks based on current configuration (VAD or standard chunking)
+    private static func makeChunks(from audioURL: URL) -> [(samples: [Float], startTime: Double, endTime: Double)]? {
         if useVADChunking {
             guard let vadChunks = WhisperAudioConverter.createAudioChunksWithVAD(
                 from: audioURL,
@@ -273,25 +210,15 @@ struct WhisperTranscriptionService {
                 vadEnergyThreshold: vadEnergyThreshold,
                 vadMinSpeechDuration: vadMinSpeechDuration,
                 vadMinSilenceDuration: vadMinSilenceDuration
-            ) else {
-                print("❌ Failed to create VAD-based audio chunks")
-                return nil
-            }
-            // Convert VAD chunks to standard chunk format for compatibility
-            chunks = vadChunks.map { ($0.samples, $0.startTime, $0.endTime) }
+            ) else { return nil }
+            return vadChunks.map { ($0.samples, $0.startTime, $0.endTime) }
         } else {
-            guard let standardChunks = WhisperAudioConverter.createAudioChunks(
+            return WhisperAudioConverter.createAudioChunks(
                 from: audioURL,
                 maxDuration: maxChunkDuration,
                 overlap: chunkOverlap
-            ) else {
-                print("❌ Failed to create audio chunks")
-                return nil
-            }
-            chunks = standardChunks
+            )
         }
-        
-        return processChunksToSegments(chunks, language: language, prompt: prompt, modelPaths: modelPaths)
     }
     
     // MARK: - Streaming Methods (for backward compatibility)
@@ -426,28 +353,19 @@ struct WhisperTranscriptionService {
     }
     
     /// Transcribes a single audio chunk
-    private static func transcribeChunk(_ samples: [Float], 
-                                       language: String?, 
-                                       prompt: String?, 
+    private static func transcribeChunk(_ samples: [Float],
+                                       language: String?,
+                                       prompt: String?,
                                        modelPaths: (binPath: URL, encoderDir: URL)?) -> String? {
-        
+
         // Get context for this chunk
         let context: OpaquePointer?
         if resetContextBetweenChunks {
-            // Create isolated context for this chunk
             context = WhisperContextManager.createIsolatedContext(modelPaths: modelPaths)
-            if context == nil {
-                print("❌ Failed to create isolated context for chunk")
-                return nil
-            }
         } else {
-            // Use shared context
             context = WhisperContextManager.getOrCreateContext(modelPaths: modelPaths)
-            if context == nil {
-                print("❌ Failed to get shared context for chunk")
-                return nil
-            }
         }
+        guard let ctx = context else { return nil }
         
         defer {
             // Clean up isolated context
@@ -467,22 +385,22 @@ struct WhisperTranscriptionService {
         params.max_tokens = 0
         params.audio_ctx = 0
         
-        // Set language if provided
-        if let lang = language {
-            let langCString = lang.cString(using: .utf8)
-            params.language = langCString?.withUnsafeBufferPointer { $0.baseAddress }
-        }
-        
-        // Set prompt if provided
-        if let promptText = prompt {
-            let promptCString = promptText.cString(using: .utf8)
-            params.initial_prompt = promptCString?.withUnsafeBufferPointer { $0.baseAddress }
-        }
-        
+        // Prepare stable C-strings for language and prompt (freed after call)
+        var langPtr: UnsafeMutablePointer<CChar>? = nil
+        var promptPtr: UnsafeMutablePointer<CChar>? = nil
+        if let lang = language { langPtr = strdup(lang) }
+        if let promptText = prompt { promptPtr = strdup(promptText) }
+        params.language = UnsafePointer(langPtr)
+        params.initial_prompt = UnsafePointer(promptPtr)
+
         // Process the audio
         let result = samples.withUnsafeBufferPointer { buffer in
-            whisper_full(context, params, buffer.baseAddress, Int32(buffer.count))
+            whisper_full(ctx, params, buffer.baseAddress, Int32(buffer.count))
         }
+
+        // Free temporary C-strings
+        if let lp = langPtr { free(lp) }
+        if let pp = promptPtr { free(pp) }
         
         guard result == 0 else {
             print("❌ whisper_full failed with code: \(result)")
@@ -490,11 +408,11 @@ struct WhisperTranscriptionService {
         }
         
         // Extract transcription
-        let segmentCount = whisper_full_n_segments(context)
+        let segmentCount = whisper_full_n_segments(ctx)
         var transcription = ""
         
         for i in 0..<segmentCount {
-            if let segmentText = whisper_full_get_segment_text(context, i) {
+            if let segmentText = whisper_full_get_segment_text(ctx, i) {
                 let text = String(cString: segmentText).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {
                     transcription += text + " "
@@ -515,20 +433,11 @@ struct WhisperTranscriptionService {
         // Get context for this chunk
         let context: OpaquePointer?
         if resetContextBetweenChunks {
-            // Create isolated context for this chunk
             context = WhisperContextManager.createIsolatedContext(modelPaths: modelPaths)
-            if context == nil {
-                print("❌ Failed to create isolated context for chunk")
-                return nil
-            }
         } else {
-            // Use shared context
             context = WhisperContextManager.getOrCreateContext(modelPaths: modelPaths)
-            if context == nil {
-                print("❌ Failed to get shared context for chunk")
-                return nil
-            }
         }
+        guard let ctx = context else { return nil }
         
         defer {
             // Clean up isolated context
@@ -548,22 +457,22 @@ struct WhisperTranscriptionService {
         params.max_tokens = 0
         params.audio_ctx = 0
         
-        // Set language if provided
-        if let lang = language {
-            let langCString = lang.cString(using: .utf8)
-            params.language = langCString?.withUnsafeBufferPointer { $0.baseAddress }
-        }
-        
-        // Set prompt if provided
-        if let promptText = prompt {
-            let promptCString = promptText.cString(using: .utf8)
-            params.initial_prompt = promptCString?.withUnsafeBufferPointer { $0.baseAddress }
-        }
-        
+        // Prepare stable C-strings for language and prompt (freed after call)
+        var langPtr: UnsafeMutablePointer<CChar>? = nil
+        var promptPtr: UnsafeMutablePointer<CChar>? = nil
+        if let lang = language { langPtr = strdup(lang) }
+        if let promptText = prompt { promptPtr = strdup(promptText) }
+        params.language = UnsafePointer(langPtr)
+        params.initial_prompt = UnsafePointer(promptPtr)
+
         // Process the audio
         let result = samples.withUnsafeBufferPointer { buffer in
-            whisper_full(context, params, buffer.baseAddress, Int32(buffer.count))
+            whisper_full(ctx, params, buffer.baseAddress, Int32(buffer.count))
         }
+
+        // Free temporary C-strings
+        if let lp = langPtr { free(lp) }
+        if let pp = promptPtr { free(pp) }
         
         guard result == 0 else {
             print("❌ whisper_full failed with code: \(result)")
@@ -571,15 +480,15 @@ struct WhisperTranscriptionService {
         }
         
         // Extract segments with timestamps
-        let segmentCount = whisper_full_n_segments(context)
+        let segmentCount = whisper_full_n_segments(ctx)
         var segments = [TranscriptionSegment]()
         
         for i in 0..<segmentCount {
-            if let segmentText = whisper_full_get_segment_text(context, i) {
+            if let segmentText = whisper_full_get_segment_text(ctx, i) {
                 let text = String(cString: segmentText).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {
-                    let startTime = Double(whisper_full_get_segment_t0(context, i)) / 100.0 + chunkStartTime
-                    let endTime = Double(whisper_full_get_segment_t1(context, i)) / 100.0 + chunkStartTime
+                    let startTime = Double(whisper_full_get_segment_t0(ctx, i)) / 100.0 + chunkStartTime
+                    let endTime = Double(whisper_full_get_segment_t1(ctx, i)) / 100.0 + chunkStartTime
                     
                     segments.append(TranscriptionSegment(
                         startTime: startTime,

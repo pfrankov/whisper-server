@@ -1,14 +1,9 @@
 import Foundation
 import whisper
-#if os(macOS) || os(iOS)
-import SwiftUI
 import AVFoundation
-import Darwin
-import AppKit
-#endif
 
 /// Handles conversion of various audio formats to 16-bit, 16kHz mono WAV required by Whisper
-class WhisperAudioConverter {
+final class WhisperAudioConverter {
     // MARK: - Constants
     
     /// Target sample rate required by Whisper
@@ -30,18 +25,11 @@ class WhisperAudioConverter {
     /// - Parameter audioURL: URL of the original audio file
     /// - Returns: Converted audio data as PCM 16-bit 16kHz mono samples, or nil if conversion failed
     static func convertToWhisperFormat(from audioURL: URL) -> [Float]? {
-        #if os(macOS) || os(iOS)
         return convertUsingAVFoundation(from: audioURL)
-        #else
-        print("❌ Audio conversion is only supported on macOS and iOS")
-        return nil
-        #endif
     }
     
-    #if os(macOS) || os(iOS)
     /// Converts audio using AVFoundation framework - unified approach for all formats
     private static func convertUsingAVFoundation(from audioURL: URL) -> [Float]? {
-        print("🔄 Converting audio to Whisper format (16kHz mono float)")
         
         // Target format: 16kHz mono float
         let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -56,17 +44,12 @@ class WhisperAudioConverter {
         }
         
         let sourceFormat = audioFile.processingFormat
-        print("🔍 Source format: \(sourceFormat.sampleRate)Hz, \(sourceFormat.channelCount) channels")
-        print("🔍 Source duration: \(String(format: "%.2f", Double(audioFile.length) / sourceFormat.sampleRate))s")
-        print("🔍 Target format: \(outputFormat.sampleRate)Hz, \(outputFormat.channelCount) channels")
+        _ = sourceFormat
         
         // Convert the audio file to the required format
         let convertedSamples = convertAudioFile(audioFile, toFormat: outputFormat)
         
-        if let samples = convertedSamples {
-            print("🔍 Final converted samples: \(samples.count) samples")
-            print("🔍 Final duration: \(String(format: "%.2f", Double(samples.count) / outputFormat.sampleRate))s")
-        }
+        if let _ = convertedSamples { }
         
         return convertedSamples
     }
@@ -76,11 +59,7 @@ class WhisperAudioConverter {
         let sourceFormat = file.processingFormat
         let frameCount = AVAudioFrameCount(file.length)
         
-        print("🔍 DEBUG: Source file info:")
-        print("   - Frames: \(file.length)")
-        print("   - Sample Rate: \(sourceFormat.sampleRate)Hz")
-        print("   - Channels: \(sourceFormat.channelCount)")
-        print("   - Original Duration: \(String(format: "%.2f", Double(file.length) / sourceFormat.sampleRate))s")
+        // Source file metadata available via `file` and `sourceFormat` if needed
         
         // Validate input
         guard frameCount > 0 else {
@@ -125,29 +104,21 @@ class WhisperAudioConverter {
         // Perform conversion
         var error: NSError?
         var inputProvided = false
-        var inputBlockCallCount = 0
         let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
-            inputBlockCallCount += 1
-            print("🔄 DEBUG: Input block called \(inputBlockCallCount) time(s), requested packets: \(inNumPackets)")
-            
             if inputProvided {
                 // We've already provided all input data
                 outStatus.pointee = .noDataNow
-                print("🚫 DEBUG: No more data to provide (already provided)")
                 return nil
             } else {
                 // Provide the input buffer once
                 inputProvided = true
                 outStatus.pointee = .haveData
-                print("✅ DEBUG: Providing input buffer with \(buffer.frameLength) frames to converter")
                 return buffer
             }
         }
         
         let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
-        
-        print("🔄 DEBUG: Conversion completed with status: \(status)")
-        print("🔄 DEBUG: Input block was called \(inputBlockCallCount) time(s) total")
+        _ = status
         
         if status == .error || error != nil {
             print("❌ Conversion failed: \(error?.localizedDescription ?? "unknown error")")
@@ -158,13 +129,7 @@ class WhisperAudioConverter {
             print("❌ No frames were converted")
             return nil
         }
-        
-        print("✅ Successfully converted to \(outputBuffer.frameLength) frames at \(outputFormat.sampleRate)Hz")
-        print("🔍 DEBUG: Converted file info:")
-        print("   - Output Frames: \(outputBuffer.frameLength)")
-        print("   - Output Sample Rate: \(outputFormat.sampleRate)Hz")
-        print("   - Expected Duration: \(String(format: "%.2f", Double(outputBuffer.frameLength) / outputFormat.sampleRate))s")
-        print("   - Conversion Ratio: \(String(format: "%.4f", Double(outputBuffer.frameLength) / Double(frameCount)))")
+        // Conversion succeeded
         
         return extractSamplesFromBuffer(outputBuffer)
     }
@@ -203,7 +168,7 @@ class WhisperAudioConverter {
                                            energyThreshold: Float = 0.02,
                                            minSpeechDuration: Double = 0.3,
                                            minSilenceDuration: Double = 0.5) -> [SpeechSegment] {
-        print("🎤 Running Voice Activity Detection on \(samples.count) samples")
+        // Running simple energy-based VAD
         
         // Window size for energy calculation (20ms)
         let windowSize = Int(sampleRate * 0.02)
@@ -265,10 +230,7 @@ class WhisperAudioConverter {
             }
         }
         
-        print("🎯 Detected \(speechSegments.count) speech segments")
-        for (index, segment) in speechSegments.enumerated() {
-            print("   - Segment \(index + 1): \(String(format: "%.1f", segment.startTime))s - \(String(format: "%.1f", segment.endTime))s")
-        }
+        // Detected `speechSegments.count` segments
         
         return speechSegments
     }
@@ -288,8 +250,7 @@ class WhisperAudioConverter {
                                        vadEnergyThreshold: Float = 0.02,
                                        vadMinSpeechDuration: Double = 0.3,
                                        vadMinSilenceDuration: Double = 0.5) -> [(samples: [Float], startTime: Double, endTime: Double, originalStartTime: Double)]? {
-        print("🔄 Creating audio chunks with VAD (VAD: \(vadEnabled ? "ON" : "OFF"))")
-        print("🎯 Pure VAD-based segmentation - each speech segment becomes its own chunk")
+        // Pure VAD-based segmentation - each speech segment becomes its own chunk
         
         // Convert audio to Whisper format first
         guard let allSamples = convertToWhisperFormat(from: audioURL) else {
@@ -298,11 +259,9 @@ class WhisperAudioConverter {
         }
         
         let totalDuration = Double(allSamples.count) / targetSampleRate
-        print("🔍 Total audio duration: \(String(format: "%.1f", totalDuration)) seconds")
         
         // If VAD is disabled, process entire audio as single chunk
         if !vadEnabled {
-            print("📋 VAD disabled, processing entire audio as single chunk")
             return [(samples: allSamples, startTime: 0.0, endTime: totalDuration, originalStartTime: 0.0)]
         }
         
@@ -401,7 +360,7 @@ class WhisperAudioConverter {
     ///   - overlap: Overlap between chunks in seconds
     /// - Returns: Array of audio sample arrays, each representing a chunk
     static func createAudioChunks(from audioURL: URL, maxDuration: Double, overlap: Double) -> [(samples: [Float], startTime: Double, endTime: Double)]? {
-        print("🔄 Creating audio chunks (max: \(Int(maxDuration))s, overlap: \(Int(overlap))s)")
+        // Creating audio chunks with fixed window and optional overlap
         
         // Target format: 16kHz mono float
         let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -418,15 +377,11 @@ class WhisperAudioConverter {
         let sourceFormat = audioFile.processingFormat
         let totalDuration = Double(audioFile.length) / sourceFormat.sampleRate
         
-        print("🔍 Source format: \(sourceFormat.sampleRate)Hz, \(sourceFormat.channelCount) channels")
-        print("🔍 Total duration: \(String(format: "%.1f", totalDuration)) seconds")
+        // Source format and total duration available if needed
         
         // If the audio is shorter than maxDuration, process as single chunk
         if totalDuration <= maxDuration {
-            print("📋 Audio is short enough, processing as single chunk")
-            guard let samples = convertAudioFile(audioFile, toFormat: outputFormat) else {
-                return nil
-            }
+            guard let samples = convertAudioFile(audioFile, toFormat: outputFormat) else { return nil }
             return [(samples: samples, startTime: 0.0, endTime: totalDuration)]
         }
         
@@ -437,8 +392,6 @@ class WhisperAudioConverter {
         while currentStart < totalDuration {
             let currentEnd = min(currentStart + maxDuration, totalDuration)
             let actualStart = max(0.0, currentStart - (chunks.count > 0 ? overlap : 0.0))
-            
-            print("🔄 Processing chunk \(chunks.count + 1): \(String(format: "%.1f", actualStart))s - \(String(format: "%.1f", currentEnd))s")
             
             // Extract chunk samples
             guard let chunkSamples = extractAudioChunk(from: audioFile, 
@@ -455,7 +408,6 @@ class WhisperAudioConverter {
             currentStart = currentEnd
         }
         
-        print("✅ Created \(chunks.count) audio chunks")
         return chunks
     }
     
@@ -522,5 +474,4 @@ class WhisperAudioConverter {
             return extractSamplesFromBuffer(outputBuffer)
         }
     }
-    #endif
-} 
+}

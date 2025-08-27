@@ -1,8 +1,6 @@
 import Foundation
+import Darwin
 import whisper
-#if os(macOS) || os(iOS)
-import AppKit
-#endif
 
 /// Manages Whisper context lifecycle, memory usage, and Metal shader caching
 class WhisperContextManager {
@@ -18,17 +16,13 @@ class WhisperContextManager {
     private static var lastActivityTime = Date()
     private static var inactivityTimeout: TimeInterval = 30.0 // Default 30 seconds
     
-    /// Notification name for when Metal is activated
-    static let metalActivatedNotificationName = NSNotification.Name("WhisperMetalActivated")
-    
     // MARK: - Context Management
     
     /// Sets the inactivity timeout in seconds
     /// - Parameter seconds: Number of seconds of inactivity before resources are released
     static func setInactivityTimeout(seconds: TimeInterval) {
         inactivityTimeout = max(5.0, seconds) // Minimum 5 seconds
-        print("🕒 Whisper inactivity timeout set to \(Int(inactivityTimeout)) seconds")
-        
+
         // Reset the timer with the new timeout if it's active
         if inactivityTimer != nil {
             resetInactivityTimer()
@@ -57,16 +51,14 @@ class WhisperContextManager {
         let elapsedTime = currentTime.timeIntervalSince(lastActivityTime)
         
         if elapsedTime >= inactivityTimeout {
-            print("🕒 Inactivity timeout (\(Int(inactivityTimeout))s) reached - releasing Whisper resources")
             lock.lock(); defer { lock.unlock() }
-            
+
             if let ctx = sharedContext {
                 let memoryBefore = getMemoryUsage()
                 whisper_free(ctx)
                 sharedContext = nil
                 let memoryAfter = getMemoryUsage()
-                let freed = max(0, memoryBefore - memoryAfter)
-                print("🧹 Whisper context released due to inactivity, freed ~\(freed) MB")
+                _ = max(0, memoryBefore - memoryAfter)
             }
         }
     }
@@ -93,7 +85,6 @@ class WhisperContextManager {
     
     /// Configures a persistent Metal shader cache
     private static func setupMetalShaderCache() {
-        #if os(macOS) || os(iOS)
         // Directory for storing the Metal shader cache
         var cacheDirectory: URL
         
@@ -106,16 +97,8 @@ class WhisperContextManager {
             do {
                 try FileManager.default.createDirectory(at: whisperCacheDir, withIntermediateDirectories: true)
                 cacheDirectory = whisperCacheDir
-                print("✅ Set Metal shader cache directory: \(whisperCacheDir.path)")
-                
-                // Check if cache already exists
-                let fileManager = FileManager.default
-                let cacheFolderContents = try? fileManager.contentsOfDirectory(at: whisperCacheDir, includingPropertiesForKeys: nil)
-                if let contents = cacheFolderContents, !contents.isEmpty {
-                    print("📋 Found existing Metal cache with \(contents.count) files")
-                }
+                // Directory ensured; optional cache inspection omitted
             } catch {
-                print("⚠️ Failed to create Metal cache directory: \(error.localizedDescription)")
                 // Use temporary directory as a fallback
                 cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("WhisperMetalCache")
             }
@@ -130,7 +113,6 @@ class WhisperContextManager {
             setenv("MTL_DEBUG_SHADER_CACHE", "1", 1)
             #endif
         }
-        #endif
     }
     
     /// Frees resources on application termination
@@ -146,8 +128,7 @@ class WhisperContextManager {
             whisper_free(ctx)
             sharedContext = nil
             let memoryAfter = getMemoryUsage()
-            let freed = max(0, memoryBefore - memoryAfter)
-            print("🧹 Whisper context released during app termination, freed ~\(freed) MB")
+            _ = max(0, memoryBefore - memoryAfter)
         }
     }
     
@@ -161,13 +142,11 @@ class WhisperContextManager {
             whisper_free(ctx)
             sharedContext = nil
             let memoryAfter = getMemoryUsage()
-            let freed = max(0, memoryBefore - memoryAfter)
-            print("🔄 Whisper context released for model change, freed ~\(freed) MB")
+            _ = max(0, memoryBefore - memoryAfter)
         }
 
         // The context will be re-initialized on the next call to getOrCreateContext
-        print("✅ Context will be reinitialized on next use with new model")
-        
+
         // Reset the inactivity timer
         DispatchQueue.main.async {
             inactivityTimer?.invalidate()
@@ -184,8 +163,7 @@ class WhisperContextManager {
             whisper_free(ctx)
             sharedContext = nil
             let memoryAfter = getMemoryUsage()
-            let freed = max(0, memoryBefore - memoryAfter)
-            print("🔄 Whisper context reset between chunks, freed ~\(freed) MB")
+            _ = max(0, memoryBefore - memoryAfter)
         }
     }
     
@@ -195,45 +173,37 @@ class WhisperContextManager {
     /// - Returns: An `OpaquePointer` to a new isolated Whisper context, or `nil` on failure.
     static func createIsolatedContext(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
         guard let paths = modelPaths else {
-            print("❌ Cannot create isolated context: Model paths are not provided.")
             return nil
         }
 
         let memoryBefore = getMemoryUsage()
 
-        #if os(macOS) || os(iOS)
         setupMetalShaderCache()
-        #endif
 
         let binPath = paths.binPath
-        print("🔄 Creating isolated Whisper context from: \(binPath.lastPathComponent)")
 
         // Verify file exists and can be accessed
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: binPath.path),
               fileManager.isReadableFile(atPath: binPath.path) else {
-            print("❌ Model file doesn't exist or isn't readable at: \(binPath.path)")
             return nil
         }
 
         var contextParams = whisper_context_default_params()
 
-        #if os(macOS) || os(iOS)
         contextParams.use_gpu = true
         contextParams.flash_attn = true
         // Additional Metal optimizations
         setenv("WHISPER_METAL_NDIM", "128", 1)  // Optimization for batch size
         setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Allocate more memory for Metal
-        #endif
 
         guard let isolatedContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
-            print("❌ Failed to create isolated Whisper context from file.")
             return nil
         }
 
         let memoryAfter = getMemoryUsage()
         let used = max(0, memoryAfter - memoryBefore)
-        print("✅ Isolated Whisper context created, using ~\(used) MB")
+        _ = used
 
         return isolatedContext
     }
@@ -242,18 +212,13 @@ class WhisperContextManager {
     /// - Returns: True if initialization was successful
     static func preloadModelForShaderCaching(modelPaths: (binPath: URL, encoderDir: URL)?) -> Bool {
         guard let paths = modelPaths else {
-            print("❌ Failed to get model paths for preloading")
             return false
         }
 
-        print("🔄 Preloading Whisper model for shader caching")
-        
         // Use the unified getOrCreateContext method
         if getOrCreateContext(modelPaths: paths) != nil {
-            print("✅ Preloading successful, context is ready.")
             return true
         } else {
-            print("❌ Preloading failed.")
             return false
         }
     }
@@ -276,73 +241,53 @@ class WhisperContextManager {
     static func getOrCreateContextUnsafe(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
         // If context already exists, we're done.
         if let existingContext = sharedContext {
-            print("✅ Reusing existing Whisper context.")
             return existingContext
         }
 
         // If no context, we must create one. We need model paths.
-        print("🔄 No existing context. Initializing new Whisper context.")
         guard let paths = modelPaths else {
-            print("❌ Cannot initialize context: Model paths are not provided.")
             return nil
         }
 
         let memoryBefore = getMemoryUsage()
 
-        #if os(macOS) || os(iOS)
         setupMetalShaderCache()
-        #endif
 
         let binPath = paths.binPath
-        print("📂 Using model file at: \(binPath.path)")
 
         // Verify file exists and can be accessed
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: binPath.path),
               fileManager.isReadableFile(atPath: binPath.path) else {
-            print("❌ Model file doesn't exist or isn't readable at: \(binPath.path)")
             return nil
         }
 
         // Log file size for debugging
-        do {
-            let attributes = try fileManager.attributesOfItem(atPath: binPath.path)
-            if let fileSize = attributes[.size] as? UInt64 {
-                print("📄 File size: \(fileSize) bytes")
-            } else {
-                print("📄 File size: unknown")
-            }
-        } catch {
-            print("📄 File size: could not be determined - \(error.localizedDescription)")
-        }
+        _ = fileManager
 
         var contextParams = whisper_context_default_params()
 
-        #if os(macOS) || os(iOS)
         contextParams.use_gpu = true
         contextParams.flash_attn = true
         // Additional Metal optimizations
         setenv("WHISPER_METAL_NDIM", "128", 1)  // Optimization for batch size
         setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Allocate more memory for Metal
-        print("🔧 Metal settings: NDIM=128, MEM_MB=1024")
-        #endif
+        // Metal settings configured via env vars
 
-        print("🔄 Initializing Whisper context from file...")
         guard let newContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
-            print("❌ Failed to initialize Whisper context from file.")
             return nil
         }
 
         sharedContext = newContext
         let memoryAfter = getMemoryUsage()
         let used = max(0, memoryAfter - memoryBefore)
-        print("✅ New Whisper context initialized, using ~\(used) MB")
+        _ = used
         
         // Send notification that Metal is active
         DispatchQueue.main.async {
             let modelName = extractModelNameFromPath(paths.binPath)
             NotificationCenter.default.post(
-                name: metalActivatedNotificationName,
+                name: .whisperMetalActivated,
                 object: nil,
                 userInfo: ["modelName": modelName ?? "Unknown"]
             )
