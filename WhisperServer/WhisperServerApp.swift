@@ -6,8 +6,6 @@
 //
 
 import SwiftUI
-import Metal
-import Vapor
 
 @main
 struct WhisperServerApp: App {
@@ -46,15 +44,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Flag to track if shaders are being preloaded
     private var isPreloadingShaders: Bool = false
     
-    /// Status text for preloading
-    private var preloadStatusText: String = ""
-    
-    /// Whether to automatically start server after initialization
-    private var autoStartServer: Bool = true
-    
-    /// A flag indicating whether the server is currently starting up
-    private var isStartingServer: Bool = false
-    
     /// Track which model we've updated UI for to prevent duplicate logs
     private var lastUIUpdatedModelID: String? = nil
     
@@ -86,17 +75,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     /// Preloads Metal shaders and starts the server upon completion
     func preloadMetalShaders() {
-        // Prevent parallel execution
-        if isPreloadingShaders {
+        guard !isPreloadingShaders else {
             print("⚠️ Metal shader preloading already in progress, skipping duplicate request")
             return
         }
-        
+
         let startTime = Date()
         isPreloadingShaders = true
-        
+
         DispatchQueue.global(qos: .userInitiated).async {
-            print("🔄 Starting Metal shader preloading...")
             
             // Start shader precompilation
             var success = false
@@ -118,21 +105,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Always perform UI updates on the main thread
             DispatchQueue.main.async {
                 self.isPreloadingShaders = false
-                
+
                 // Measure elapsed time
                 let elapsedTime = Date().timeIntervalSince(startTime)
                 let formattedTime = String(format: "%.2f", elapsedTime)
-                
+
                 if success {
-                    self.preloadStatusText = "Shader compilation finished successfully in \(formattedTime) sec."
                     print("✅ Metal shader preloading completed in \(formattedTime) seconds")
-                    
+
                     // Update the Metal status in the UI to "Ready"
                     self.updateStatusMenuItem(metalCaching: false, failed: false)
                 } else {
-                    self.preloadStatusText = "Shader compilation error"
                     print("❌ Metal shader preloading failed after \(formattedTime) seconds")
-                    
+
                     // Update the Metal status in the UI as "Failed"
                     self.updateStatusMenuItem(metalCaching: false, failed: true)
                 }
@@ -180,8 +165,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.lastUIUpdatedModelID = currentModelID
             
             // Reset Metal status to inactive on model change
-            let selectedModel = self.modelManager.selectedModelName ?? "Unknown"
-            print("🔄 Resetting Metal status while preparing model: \(selectedModel)")
             
             if let item = self.statusItem, let button = item.button {
                 button.image = NSImage(systemSymbolName: "sleep", accessibilityDescription: "Sleep")
@@ -199,8 +182,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc private func handleModelReady() {
         DispatchQueue.main.async { [weak self] in
-            print("✅ Model is ready, but Whisper will only initialize on first request")
-            
             // Double-check model is actually ready
             guard let self = self, self.modelManager.isModelReady else {
                 print("⚠️ Model was reported ready but isModelReady is false")
@@ -208,15 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             
             // Verify that we can get model paths
-            if let paths = self.modelManager.getPathsForSelectedModel() {
-                let modelName = self.modelManager.selectedModelName ?? "Unknown"
-                print("✅ Verified model paths are available for model: \(modelName)")
-                print("   - Bin file: \(paths.binPath.path)")
-                print("   - Encoder dir: \(paths.encoderDir.path)")
-                
-                // Store the model paths in UserDefaults so they can be recovered if AppDelegate becomes inaccessible
-                self.storeCurrentModelPaths(binPath: paths.binPath.path, encoderDir: paths.encoderDir.path)
-                
+            if self.modelManager.getPathsForSelectedModel() != nil {
                 // Update the status menu to show that we're ready for first request
                 if let menu = self.statusItem.menu, let metalItem = menu.item(withTag: MenuItemTags.status.rawValue) {
                     metalItem.title = "Metal: Inactive (will initialize on first request)"
@@ -227,13 +200,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.handleModelPreparationFailed()
             }
         }
-    }
-    
-    /// Store current model paths in UserDefaults for recovery if AppDelegate becomes inaccessible
-    private func storeCurrentModelPaths(binPath: String, encoderDir: String) {
-        UserDefaults.standard.set(binPath, forKey: "CurrentModelBinPath")
-        UserDefaults.standard.set(encoderDir, forKey: "CurrentModelEncoderDir")
-        print("✅ Stored current model paths in UserDefaults for recovery")
     }
     
     @objc private func handleModelPreparationFailed() {
@@ -260,7 +226,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             
             // Update model status in menu only if it's a special status (downloading, etc.)
             let status = self.modelManager.currentStatus
-            print("📝 Model status changed: \(status)")
             
             // Decide whether to show the status item based on the status content
             let shouldShowStatus = status.lowercased().contains("download") || 
@@ -386,12 +351,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 metalItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", 
                                         accessibilityDescription: nil)
             } else {
-                // For the normal "Active" status, use updateMetalStatusWithModel
-                // This case is left for backward compatibility
-                _ = modelManager.selectedModelName ?? "Unknown"
-                metalItem.title = "Metal: Active (GPU acceleration)"
-                metalItem.image = NSImage(systemSymbolName: "checkmark.circle.fill", 
-                                        accessibilityDescription: nil)
+                let name = modelManager.selectedModelName ?? "Unknown"
+                updateMetalStatusWithModel(modelName: name)
             }
         }
     }

@@ -68,10 +68,7 @@ final class VaporServer {
 
     /// Parses response format string to enum with safe default
     private func parseResponseFormat(_ raw: String?) -> WhisperSubtitleFormatter.ResponseFormat {
-        guard let raw = raw, let fmt = WhisperSubtitleFormatter.ResponseFormat(rawValue: raw) else {
-            return .json
-        }
-        return fmt
+        WhisperSubtitleFormatter.ResponseFormat(rawValue: raw ?? "") ?? .json
     }
 
     /// Maps response format to content-type when not using SSE
@@ -136,7 +133,7 @@ final class VaporServer {
             
             let responseFormat = self.parseResponseFormat(whisperReq.response_format)
             
-            guard let modelPaths = self.modelManager.getModelPaths() else {
+            guard let modelPaths = self.modelManager.getPathsForSelectedModel() else {
                 throw Abort(.internalServerError, reason: "Model not configured")
             }
             

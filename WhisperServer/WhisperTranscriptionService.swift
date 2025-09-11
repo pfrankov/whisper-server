@@ -99,7 +99,7 @@ struct WhisperTranscriptionService {
         } else {
             // Fallback to getting paths from a temporary ModelManager instance
             let modelManager = ModelManager()
-            finalModelPaths = modelManager.getModelPaths()
+            finalModelPaths = modelManager.getPathsForSelectedModel()
         }
 
         return WhisperContextManager.preloadModelForShaderCaching(modelPaths: finalModelPaths)

@@ -54,33 +54,10 @@ class WhisperContextManager {
             lock.lock(); defer { lock.unlock() }
 
             if let ctx = sharedContext {
-                let memoryBefore = getMemoryUsage()
                 whisper_free(ctx)
                 sharedContext = nil
-                let memoryAfter = getMemoryUsage()
-                _ = max(0, memoryBefore - memoryAfter)
             }
         }
-    }
-    
-    /// Gets approximate memory usage (in MB) for logging
-    private static func getMemoryUsage() -> Int {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        
-        let result: kern_return_t = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        
-        guard result == KERN_SUCCESS else {
-            return 0
-        }
-        
-        // Convert bytes to MB (more precise calculation)
-        let bytesInMB = Double(1024 * 1024)
-        return Int(Double(info.resident_size) / bytesInMB)
     }
     
     /// Configures a persistent Metal shader cache
@@ -124,11 +101,8 @@ class WhisperContextManager {
         
         lock.lock(); defer { lock.unlock() }
         if let ctx = sharedContext {
-            let memoryBefore = getMemoryUsage()
             whisper_free(ctx)
             sharedContext = nil
-            let memoryAfter = getMemoryUsage()
-            _ = max(0, memoryBefore - memoryAfter)
         }
     }
     
@@ -138,11 +112,8 @@ class WhisperContextManager {
 
         // First, free the current context if it exists
         if let ctx = sharedContext {
-            let memoryBefore = getMemoryUsage()
             whisper_free(ctx)
             sharedContext = nil
-            let memoryAfter = getMemoryUsage()
-            _ = max(0, memoryBefore - memoryAfter)
         }
 
         // The context will be re-initialized on the next call to getOrCreateContext
@@ -159,11 +130,8 @@ class WhisperContextManager {
     static func resetContextForChunk() {
         // Release current context if it exists
         if let ctx = sharedContext {
-            let memoryBefore = getMemoryUsage()
             whisper_free(ctx)
             sharedContext = nil
-            let memoryAfter = getMemoryUsage()
-            _ = max(0, memoryBefore - memoryAfter)
         }
     }
     
@@ -175,8 +143,6 @@ class WhisperContextManager {
         guard let paths = modelPaths else {
             return nil
         }
-
-        let memoryBefore = getMemoryUsage()
 
         setupMetalShaderCache()
 
@@ -200,10 +166,6 @@ class WhisperContextManager {
         guard let isolatedContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
             return nil
         }
-
-        let memoryAfter = getMemoryUsage()
-        let used = max(0, memoryAfter - memoryBefore)
-        _ = used
 
         return isolatedContext
     }
@@ -249,8 +211,6 @@ class WhisperContextManager {
             return nil
         }
 
-        let memoryBefore = getMemoryUsage()
-
         setupMetalShaderCache()
 
         let binPath = paths.binPath
@@ -279,9 +239,6 @@ class WhisperContextManager {
         }
 
         sharedContext = newContext
-        let memoryAfter = getMemoryUsage()
-        let used = max(0, memoryAfter - memoryBefore)
-        _ = used
         
         // Send notification that Metal is active
         DispatchQueue.main.async {

@@ -1,12 +1,6 @@
 import Foundation
 import Combine
 
-/// Protocol for providing model paths, allowing different implementations
-protocol ModelPathProvider {
-    /// Returns the paths to model files or nil if unavailable
-    func getModelPaths() -> (binPath: URL, encoderDir: URL)?
-}
-
 // MARK: - Data Structures
 
 struct ModelFile: Codable, Hashable {
@@ -23,7 +17,7 @@ struct Model: Codable, Identifiable, Hashable {
 
 // MARK: - ModelManager Class
 
-final class ModelManager: @unchecked Sendable, ModelPathProvider {
+final class ModelManager: @unchecked Sendable {
 
     // MARK: - Properties
 
@@ -59,13 +53,6 @@ final class ModelManager: @unchecked Sendable, ModelPathProvider {
     private var currentDownloadTasks: [URLSessionDownloadTask] = []
     private var urlSession: URLSession!
     private var progressObservation: NSKeyValueObservation?
-
-    // MARK: - ModelPathProvider Protocol Implementation
-    
-    /// Returns the paths to model files for the selected model
-    func getModelPaths() -> (binPath: URL, encoderDir: URL)? {
-        return getPathsForSelectedModel()
-    }
 
     // MARK: - Initialization
 
