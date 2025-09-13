@@ -54,84 +54,139 @@ final class WhisperAudioConverter {
         return convertedSamples
     }
     
-    /// Converts an audio file to the specified format
+    /// Converts an audio file to the specified format using streaming approach for large files
     private static func convertAudioFile(_ file: AVAudioFile, toFormat outputFormat: AVAudioFormat) -> [Float]? {
         let sourceFormat = file.processingFormat
-        let frameCount = AVAudioFrameCount(file.length)
-        
-        // Source file metadata available via `file` and `sourceFormat` if needed
+        let totalFrameCount = AVAudioFrameCount(file.length)
         
         // Validate input
-        guard frameCount > 0 else {
+        guard totalFrameCount > 0 else {
             print("❌ Audio file is empty")
             return nil
         }
         
-        // Read the entire file into a buffer
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else {
-            print("❌ Failed to create source PCM buffer")
-            return nil
-        }
+        // Define chunk size (1 second worth of frames)
+        let chunkDurationSeconds = 1.0
+        let chunkFrameCount = AVAudioFrameCount(sourceFormat.sampleRate * chunkDurationSeconds)
         
-        do {
-            try file.read(into: buffer)
-        } catch {
-            print("❌ Failed to read audio file: \(error.localizedDescription)")
-            return nil
-        }
-        
-        // If source format matches target format, just return the samples
+        // If source format matches target format, read in chunks without conversion
         if abs(sourceFormat.sampleRate - outputFormat.sampleRate) < 1.0 && 
            sourceFormat.channelCount == outputFormat.channelCount {
-            return extractSamplesFromBuffer(buffer)
+            
+            var allSamples: [Float] = []
+            allSamples.reserveCapacity(Int(totalFrameCount))
+            
+            // Reset file position to beginning
+            file.framePosition = 0
+            
+            var remainingFrames = totalFrameCount
+            while remainingFrames > 0 {
+                let framesToRead = min(chunkFrameCount, remainingFrames)
+                
+                guard let chunkBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: framesToRead) else {
+                    print("❌ Failed to create chunk buffer")
+                    return nil
+                }
+                
+                do {
+                    try file.read(into: chunkBuffer, frameCount: framesToRead)
+                } catch {
+                    print("❌ Failed to read audio chunk: \(error.localizedDescription)")
+                    return nil
+                }
+                
+                if let chunkSamples = extractSamplesFromBuffer(chunkBuffer) {
+                    allSamples.append(contentsOf: chunkSamples)
+                } else {
+                    print("❌ Failed to extract samples from chunk")
+                    return nil
+                }
+                
+                remainingFrames -= framesToRead
+            }
+            
+            return allSamples
         }
         
-        // Create converter and convert
+        // Need conversion - use streaming approach
         guard let converter = AVAudioConverter(from: sourceFormat, to: outputFormat) else {
             print("❌ Failed to create audio converter")
             return nil
         }
         
-        // Calculate output buffer size with some margin
         let ratio = outputFormat.sampleRate / sourceFormat.sampleRate
-        let outputFrameCapacity = AVAudioFrameCount(Double(frameCount) * ratio * 1.1)
+        var allConvertedSamples: [Float] = []
+        // Reserve capacity with estimated final size
+        allConvertedSamples.reserveCapacity(Int(Double(totalFrameCount) * ratio))
         
-        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputFrameCapacity) else {
-            print("❌ Failed to create output buffer")
-            return nil
-        }
+        // Reset file position to beginning
+        file.framePosition = 0
         
-        // Perform conversion
-        var error: NSError?
-        var inputProvided = false
-        let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
-            if inputProvided {
-                // We've already provided all input data
-                outStatus.pointee = .noDataNow
+        var remainingFrames = totalFrameCount
+        while remainingFrames > 0 {
+            let framesToRead = min(chunkFrameCount, remainingFrames)
+            
+            // Create input buffer for this chunk
+            guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: framesToRead) else {
+                print("❌ Failed to create input chunk buffer")
                 return nil
-            } else {
-                // Provide the input buffer once
-                inputProvided = true
-                outStatus.pointee = .haveData
-                return buffer
             }
+            
+            // Read chunk from file
+            do {
+                try file.read(into: inputBuffer, frameCount: framesToRead)
+            } catch {
+                print("❌ Failed to read audio chunk: \(error.localizedDescription)")
+                return nil
+            }
+            
+            // Skip empty chunks
+            if inputBuffer.frameLength == 0 {
+                break
+            }
+            
+            // Create output buffer for this chunk
+            let outputFrameCapacity = AVAudioFrameCount(Double(framesToRead) * ratio * 1.1)
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputFrameCapacity) else {
+                print("❌ Failed to create output chunk buffer")
+                return nil
+            }
+            
+            // Convert this chunk
+            var error: NSError?
+            var inputProvided = false
+            let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+                if inputProvided {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                } else {
+                    inputProvided = true
+                    outStatus.pointee = .haveData
+                    return inputBuffer
+                }
+            }
+            
+            let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+            
+            if status == .error || error != nil {
+                print("❌ Chunk conversion failed: \(error?.localizedDescription ?? "unknown error")")
+                return nil
+            }
+            
+            // Extract and accumulate samples from this chunk
+            if let chunkSamples = extractSamplesFromBuffer(outputBuffer) {
+                allConvertedSamples.append(contentsOf: chunkSamples)
+            }
+            
+            remainingFrames -= framesToRead
         }
         
-        let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
-        _ = status
-        
-        if status == .error || error != nil {
-            print("❌ Conversion failed: \(error?.localizedDescription ?? "unknown error")")
-            return nil
-        }
-        
-        if outputBuffer.frameLength == 0 {
+        if allConvertedSamples.isEmpty {
             print("❌ No frames were converted")
             return nil
         }
-        // Conversion succeeded
         
-        return extractSamplesFromBuffer(outputBuffer)
+        return allConvertedSamples
     }
     
     /// Extracts float samples from an audio buffer
