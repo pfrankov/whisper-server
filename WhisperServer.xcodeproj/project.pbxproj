@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		8D121C872DF89FC200F25B13 /* Vapor in Frameworks */ = {isa = PBXBuildFile; productRef = 8D121C862DF89FC200F25B13 /* Vapor */; };
+		8D223B2E2E75EB4E00DF9D06 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 8D223B2D2E75EB4E00DF9D06 /* FluidAudio */; };
+		/* removed 8D223B302E75EB4E00DF9D06 fluidaudio in Frameworks */
 		8D28D83B2D93739300079B61 /* whisper.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8D28D83A2D93739300079B61 /* whisper.xcframework */; };
 		8D28D83C2D93739300079B61 /* whisper.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 8D28D83A2D93739300079B61 /* whisper.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -74,6 +76,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				8D28D83B2D93739300079B61 /* whisper.xcframework in Frameworks */,
+				8D223B2E2E75EB4E00DF9D06 /* FluidAudio in Frameworks */,
 				8D121C872DF89FC200F25B13 /* Vapor in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -146,6 +149,7 @@
 			name = WhisperServer;
 			packageProductDependencies = (
 				8D121C862DF89FC200F25B13 /* Vapor */,
+				8D223B2D2E75EB4E00DF9D06 /* FluidAudio */,
 			);
 			productName = WhisperServer;
 			productReference = 8DE541C52D919CCF0015BF48 /* WhisperServer.app */;
@@ -231,6 +235,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				8D121C852DF89FC200F25B13 /* XCRemoteSwiftPackageReference "vapor" */,
+				8D223B2C2E75EB4E00DF9D06 /* XCRemoteSwiftPackageReference "FluidAudio" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 8DE541C62D919CCF0015BF48 /* Products */;
@@ -609,6 +614,14 @@
 				minimumVersion = 4.115.0;
 			};
 		};
+		8D223B2C2E75EB4E00DF9D06 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -617,6 +630,12 @@
 			package = 8D121C852DF89FC200F25B13 /* XCRemoteSwiftPackageReference "vapor" */;
 			productName = Vapor;
 		};
+		8D223B2D2E75EB4E00DF9D06 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8D223B2C2E75EB4E00DF9D06 /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
+		};
+		/* removed XCSwiftPackageProductDependency fluidaudio */
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8DE541BD2D919CCF0015BF48 /* Project object */;

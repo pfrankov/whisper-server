@@ -43,15 +43,8 @@ final class WhisperAudioConverter {
             return nil
         }
         
-        let sourceFormat = audioFile.processingFormat
-        _ = sourceFormat
-        
         // Convert the audio file to the required format
-        let convertedSamples = convertAudioFile(audioFile, toFormat: outputFormat)
-        
-        if let _ = convertedSamples { }
-        
-        return convertedSamples
+        return convertAudioFile(audioFile, toFormat: outputFormat)
     }
     
     /// Converts an audio file to the specified format using streaming approach for large files
@@ -69,9 +62,11 @@ final class WhisperAudioConverter {
         let chunkDurationSeconds = 1.0
         let chunkFrameCount = AVAudioFrameCount(sourceFormat.sampleRate * chunkDurationSeconds)
         
-        // If source format matches target format, read in chunks without conversion
-        if abs(sourceFormat.sampleRate - outputFormat.sampleRate) < 1.0 && 
-           sourceFormat.channelCount == outputFormat.channelCount {
+        // If source format already matches target (16kHz, mono, Float32, non-interleaved), skip conversion
+        if abs(sourceFormat.sampleRate - outputFormat.sampleRate) < 1.0 &&
+           sourceFormat.channelCount == outputFormat.channelCount &&
+           sourceFormat.commonFormat == .pcmFormatFloat32 &&
+           sourceFormat.isInterleaved == false {
             
             var allSamples: [Float] = []
             allSamples.reserveCapacity(Int(totalFrameCount))
@@ -181,10 +176,7 @@ final class WhisperAudioConverter {
             remainingFrames -= framesToRead
         }
         
-        if allConvertedSamples.isEmpty {
-            print("❌ No frames were converted")
-            return nil
-        }
+        if allConvertedSamples.isEmpty { return nil }
         
         return allConvertedSamples
     }
@@ -285,8 +277,6 @@ final class WhisperAudioConverter {
             }
         }
         
-        // Detected `speechSegments.count` segments
-        
         return speechSegments
     }
     
@@ -345,11 +335,6 @@ final class WhisperAudioConverter {
                                                   removeLeadingSilence: removeLeadingSilence) {
                 chunks.append(chunk)
             }
-        }
-        
-        print("✅ Created \(chunks.count) VAD-based audio chunks")
-        for (index, chunk) in chunks.enumerated() {
-            print("   - Chunk \(index + 1): \(String(format: "%.1f", chunk.startTime))s - \(String(format: "%.1f", chunk.endTime))s (original: \(String(format: "%.1f", chunk.originalStartTime))s)")
         }
         
         return chunks
@@ -496,9 +481,11 @@ final class WhisperAudioConverter {
             return nil
         }
         
-        // Convert to target format if needed
-        if abs(sourceFormat.sampleRate - targetFormat.sampleRate) < 1.0 && 
-           sourceFormat.channelCount == targetFormat.channelCount {
+        // Convert to target format if needed. Only skip when buffer is already Float32 mono 16k non-interleaved
+        if abs(sourceFormat.sampleRate - targetFormat.sampleRate) < 1.0 &&
+           sourceFormat.channelCount == targetFormat.channelCount &&
+           sourceFormat.commonFormat == .pcmFormatFloat32 &&
+           sourceFormat.isInterleaved == false {
             return extractSamplesFromBuffer(buffer)
         } else {
             // Create converter for this chunk

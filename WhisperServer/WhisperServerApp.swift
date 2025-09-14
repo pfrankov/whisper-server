@@ -351,7 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 metalItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", 
                                         accessibilityDescription: nil)
             } else {
-                let name = modelManager.selectedModelName ?? "Unknown"
+                let name = (modelManager.selectedProvider == .fluid) ? "FluidAudio" : (modelManager.selectedModelName ?? "Unknown")
                 updateMetalStatusWithModel(modelName: name)
             }
         }
@@ -386,8 +386,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         let modelSelectionMenuItem = NSMenuItem(title: "Select Model", action: nil, keyEquivalent: "")
         let modelSelectionSubmenu = NSMenu()
-        
-        // Populate model selection submenu with available models
+
+        // Add FluidAudio provider entry
+        let fluidItem = NSMenuItem(title: "FluidAudio (Core ML)", action: #selector(selectFluidProvider), keyEquivalent: "")
+        fluidItem.state = (modelManager.selectedProvider == .fluid) ? .on : .off
+        modelSelectionSubmenu.addItem(fluidItem)
+        modelSelectionSubmenu.addItem(NSMenuItem.separator())
+
+        // Populate model selection submenu with available models (Whisper engine)
         if modelManager.availableModels.isEmpty {
             let noModelsItem = NSMenuItem(title: "No models available", action: nil, keyEquivalent: "")
             noModelsItem.isEnabled = false
@@ -398,7 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 modelItem.representedObject = model.id
                 
                 // Check if this model is currently selected
-                if model.id == modelManager.selectedModelID {
+                if modelManager.selectedProvider == .whisper && model.id == modelManager.selectedModelID {
                     modelItem.state = .on
                 }
                 
@@ -479,8 +485,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func selectModel(_ sender: NSMenuItem) {
         guard let modelId = sender.representedObject as? String else { return }
         
-        // Check whether the model selection changed
-        if modelId != modelManager.selectedModelID {
+        // Check whether the model selection changed OR we need to switch from FluidAudio provider
+        if modelId != modelManager.selectedModelID || modelManager.selectedProvider != .whisper {
             // Get model name for logging
             let modelName = modelManager.availableModels.first(where: { $0.id == modelId })?.name ?? "Unknown"
             print("🔄 Changing model to: \(modelName) (id: \(modelId))")
@@ -489,7 +495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stopServer()
             
             // Change the model
-            modelManager.selectModel(id: modelId)
+            modelManager.selectModel(id: modelId) // also sets provider to whisper
             
             // Refresh the menu
             refreshModelSelectionMenu()
@@ -504,6 +510,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             startServer()
         }
     }
+
+    /// Select FluidAudio provider (routes all requests through FluidAudio)
+    @objc private func selectFluidProvider() {
+        // Ignore if already selected
+        guard modelManager.selectedProvider != .fluid else { return }
+
+        print("🔄 Switching engine to FluidAudio")
+        stopServer()
+        modelManager.selectProvider(.fluid)
+        refreshModelSelectionMenu()
+        updateUIForModelPreparation()
+        startServer()
+    }
     
     @objc private func refreshModelSelectionMenu() {
         guard let menu = statusItem.menu else { return }
@@ -513,7 +532,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let item = menu.items[i]
             if item.title == "Select Model", let submenu = item.submenu {
                 submenu.removeAllItems()
-                
+                // FluidAudio entry
+                let fluidItem = NSMenuItem(title: "FluidAudio (Core ML)", action: #selector(selectFluidProvider), keyEquivalent: "")
+                fluidItem.state = (modelManager.selectedProvider == .fluid) ? .on : .off
+                submenu.addItem(fluidItem)
+                submenu.addItem(NSMenuItem.separator())
+
                 if modelManager.availableModels.isEmpty {
                     let noModelsItem = NSMenuItem(title: "No models available", action: nil, keyEquivalent: "")
                     noModelsItem.isEnabled = false
@@ -524,7 +548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         modelItem.representedObject = model.id
                         
                         // Check if this model is currently selected
-                        if model.id == modelManager.selectedModelID {
+                        if modelManager.selectedProvider == .whisper && model.id == modelManager.selectedModelID {
                             modelItem.state = .on
                         }
                         

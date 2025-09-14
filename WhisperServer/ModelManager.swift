@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import FluidAudio
 
 // MARK: - Data Structures
 
@@ -21,13 +22,23 @@ final class ModelManager: @unchecked Sendable {
 
     // MARK: - Properties
 
+    enum Provider: String { case whisper, fluid }
+
     @Published private(set) var availableModels: [Model] = []
     @Published private(set) var selectedModelID: String? {
         didSet {
             UserDefaults.standard.set(selectedModelID, forKey: "selectedModelID")
             // Trigger notification when selection changes
             NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
-            checkAndPrepareSelectedModel() // Check/download when selection changes
+            if !suppressAutoPrepare { checkAndPrepareSelectedModel() }
+        }
+    }
+
+    @Published private(set) var selectedProvider: Provider = .whisper {
+        didSet {
+            UserDefaults.standard.set(selectedProvider.rawValue, forKey: "selectedProvider")
+            NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
+            if !suppressAutoPrepare { checkAndPrepareSelectedModel() }
         }
     }
     
@@ -45,14 +56,16 @@ final class ModelManager: @unchecked Sendable {
     /// Flag to indicate if model is ready for use
     @Published private(set) var isModelReady: Bool = false
     
-    /// Flag to prevent duplicate model preparation calls
-    private var isPreparingModel: Bool = false
+    /// Flags to prevent duplicate preparation per provider
+    private var isPreparingWhisperModel: Bool = false
+    private var isPreparingFluidModels: Bool = false
 
     private let fileManager = FileManager.default
     private var modelsDirectory: URL?
     private var currentDownloadTasks: [URLSessionDownloadTask] = []
     private var urlSession: URLSession!
     private var progressObservation: NSKeyValueObservation?
+    private var suppressAutoPrepare: Bool = false
 
     // MARK: - Initialization
 
@@ -63,6 +76,12 @@ final class ModelManager: @unchecked Sendable {
         setupModelsDirectory()
         loadModelDefinitions()
         selectedModelID = UserDefaults.standard.string(forKey: "selectedModelID") ?? availableModels.first?.id
+        if let providerRaw = UserDefaults.standard.string(forKey: "selectedProvider"),
+           let provider = Provider(rawValue: providerRaw) {
+            selectedProvider = provider
+        } else {
+            selectedProvider = .whisper
+        }
         NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
         checkAndPrepareSelectedModel()
     }
@@ -73,7 +92,16 @@ final class ModelManager: @unchecked Sendable {
         guard availableModels.contains(where: { $0.id == id }) else {
             return
         }
+        // Batch-update to avoid intermediate preparations on stale state
+        suppressAutoPrepare = true
+        selectedProvider = .whisper
         selectedModelID = id
+        suppressAutoPrepare = false
+        checkAndPrepareSelectedModel()
+    }
+
+    func selectProvider(_ provider: Provider) {
+        selectedProvider = provider
     }
 
     // MARK: - Private Setup & Loading
@@ -116,6 +144,38 @@ final class ModelManager: @unchecked Sendable {
     // MARK: - Model Preparation (Checking & Downloading) - To be implemented
 
     func checkAndPrepareSelectedModel() {
+        // If FluidAudio provider is selected, trigger FluidAudio model download/prepare
+        if selectedProvider == .fluid {
+            // Prevent duplicate calls (FluidAudio only)
+            if isPreparingFluidModels { return }
+            isPreparingFluidModels = true
+            isModelReady = false
+            currentStatus = "Preparing FluidAudio models..."
+            downloadProgress = nil
+
+            Task { [weak self] in
+                guard let self = self else { return }
+                do {
+                    // Download and compile models (cached between runs)
+                    _ = try await AsrModels.downloadAndLoad()
+                    DispatchQueue.main.async {
+                        self.currentStatus = "FluidAudio models ready"
+                        self.isModelReady = true
+                        self.isPreparingFluidModels = false
+                        NotificationCenter.default.post(name: .modelIsReady, object: self)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.currentStatus = "Error preparing FluidAudio models: \(error.localizedDescription)"
+                        self.isModelReady = false
+                        self.isPreparingFluidModels = false
+                        NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+                    }
+                }
+            }
+            return
+        }
+
         guard let selectedID = selectedModelID,
               let model = availableModels.first(where: { $0.id == selectedID }),
               let modelsDir = modelsDirectory else {
@@ -125,10 +185,10 @@ final class ModelManager: @unchecked Sendable {
             return
         }
 
-        // Prevent duplicate calls
-        if isPreparingModel { return }
-        
-        isPreparingModel = true
+        // Prevent duplicate calls (Whisper only)
+        if isPreparingWhisperModel { return }
+
+        isPreparingWhisperModel = true
         currentStatus = "Checking model: \(model.name)"
         isModelReady = false
 
@@ -139,7 +199,7 @@ final class ModelManager: @unchecked Sendable {
                 if filesExist {
                     currentStatus = "Model '\(model.name)' is ready."
                     isModelReady = true
-                    isPreparingModel = false // Reset flag
+                    isPreparingWhisperModel = false // Reset flag
                     NotificationCenter.default.post(name: .modelIsReady, object: self)
                 } else {
                     currentStatus = "Downloading model: \(model.name)..."
@@ -148,13 +208,13 @@ final class ModelManager: @unchecked Sendable {
                     try await downloadAndPrepareModel(model: model, directory: modelsDir)
                     // After successful download, model is ready
                     isModelReady = true
-                    isPreparingModel = false // Reset flag
+                    isPreparingWhisperModel = false // Reset flag
                     NotificationCenter.default.post(name: .modelIsReady, object: self)
                 }
             } catch {
                 currentStatus = "Error checking model files: \(error.localizedDescription)"
                 isModelReady = false
-                isPreparingModel = false // Reset flag on error
+                isPreparingWhisperModel = false // Reset flag on error
                 NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
             }
         }

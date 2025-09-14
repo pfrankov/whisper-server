@@ -1,5 +1,6 @@
 import Foundation
 import Vapor
+import FluidAudio
 
 /// HTTP server for processing Whisper API requests using Vapor
 final class VaporServer {
@@ -66,6 +67,9 @@ final class VaporServer {
     
     // MARK: - Private Methods
 
+    /// Supported providers
+    private enum Provider: String { case whisper, fluid }
+
     /// Parses response format string to enum with safe default
     private func parseResponseFormat(_ raw: String?) -> WhisperSubtitleFormatter.ResponseFormat {
         WhisperSubtitleFormatter.ResponseFormat(rawValue: raw ?? "") ?? .json
@@ -103,7 +107,27 @@ final class VaporServer {
         let formattedLines = lines.map { "data: \($0)" }.joined(separator: "\n")
         return "\(formattedLines)\n\n"
     }
-    
+
+    /// Builds response headers depending on streaming mode/content type
+    private func buildHeaders(useSSE: Bool, format: WhisperSubtitleFormatter.ResponseFormat) -> HTTPHeaders {
+        var headers = HTTPHeaders()
+        if useSSE {
+            headers.add(name: "Content-Type", value: "text/event-stream")
+            headers.add(name: "Cache-Control", value: "no-cache")
+            headers.add(name: "Connection", value: "keep-alive")
+            headers.add(name: "Access-Control-Allow-Origin", value: "*")
+        } else {
+            headers.add(name: "Content-Type", value: self.contentType(for: format))
+        }
+        return headers
+    }
+
+    /// Resolve provider from request or UI selection
+    private func resolveProvider(_ raw: String?) -> Provider {
+        if let raw, let val = Provider(rawValue: raw.lowercased()) { return val }
+        return (self.modelManager.selectedProvider == .fluid) ? .fluid : .whisper
+    }
+
     // MARK: - Routes
     
     private func routes(_ app: Application) throws {
@@ -111,7 +135,7 @@ final class VaporServer {
         // Vapor streams requests larger than 16KB to a temporary file on disk by default.
         app.routes.defaultMaxBodySize = "1gb"
 
-        app.post("v1", "audio", "transcriptions") { req async throws -> Response in
+        app.post("v1", "audio", "transcriptions") { [self] req async throws -> Response in
             
             struct WhisperRequest: Content {
                 var file: File
@@ -119,6 +143,8 @@ final class VaporServer {
                 var prompt: String?
                 var response_format: String?
                 var stream: Bool?
+                var provider: String? // "whisper" (default) or "fluid"
+                var model: String?    // optional model hint; for Fluid treated as locale if provided
             }
             
             let whisperReq = try req.content.decode(WhisperRequest.self)
@@ -132,8 +158,17 @@ final class VaporServer {
             try await req.fileio.writeFile(whisperReq.file.data, at: tempFileURL.path)
             
             let responseFormat = self.parseResponseFormat(whisperReq.response_format)
-            
-            guard let modelPaths = self.modelManager.getPathsForSelectedModel() else {
+            let provider: Provider = self.resolveProvider(whisperReq.provider)
+
+            // Resolve whisper model paths only when needed
+            let modelPaths: (binPath: URL, encoderDir: URL)? = {
+                if provider == .whisper {
+                    return self.modelManager.getPathsForSelectedModel()
+                } else {
+                    return nil
+                }
+            }()
+            if provider == .whisper && modelPaths == nil {
                 throw Abort(.internalServerError, reason: "Model not configured")
             }
             
@@ -143,6 +178,14 @@ final class VaporServer {
                 // Choose the appropriate streaming method based on format
                 switch responseFormat {
                 case .srt, .vtt, .verboseJson:
+                    guard provider == .whisper else {
+                        // FluidAudio currently supports streaming only for text/json
+                        let errorBody = "{\"error\": \"FluidAudio provider supports only text/json for streaming\"}"
+                        var headers = HTTPHeaders()
+                        headers.add(name: "Content-Type", value: self.contentType(for: .json))
+                        try? FileManager.default.removeItem(at: tempFileURL)
+                        return Response(status: .badRequest, headers: headers, body: .init(string: errorBody))
+                    }
                     // Timestamp streaming mode
                     var segmentCounter = 0
                     let body = Response.Body(stream: { streamWriter in
@@ -223,83 +266,128 @@ final class VaporServer {
                             }
                         }
                     })
-                    var headers = HTTPHeaders()
-                    if useSSE {
-                        headers.add(name: "Content-Type", value: "text/event-stream")
-                        headers.add(name: "Cache-Control", value: "no-cache")
-                        headers.add(name: "Connection", value: "keep-alive")
-                        headers.add(name: "Access-Control-Allow-Origin", value: "*")
-                    } else {
-                        headers.add(name: "Content-Type", value: self.contentType(for: responseFormat))
-                    }
+                    let headers = self.buildHeaders(useSSE: useSSE, format: responseFormat)
                     return Response(status: .ok, headers: headers, body: body)
                 case .json, .text:
-                    // Use regular streaming for simple formats (json, text)
-                    // Regular streaming mode
+                    // Streaming contract: send chunks as they are ready.
+                    // For FluidAudio we will send a single chunk when final result is ready, then close.
                     let body = Response.Body(stream: { streamWriter in
-                        let success = WhisperTranscriptionService.transcribeAudioStream(
-                            at: tempFileURL,
-                            language: whisperReq.language,
-                            prompt: whisperReq.prompt,
+                        switch provider {
+                        case .whisper:
+                            let success = WhisperTranscriptionService.transcribeAudioStream(
+                                at: tempFileURL,
+                                language: whisperReq.language,
+                                prompt: whisperReq.prompt,
                             modelPaths: modelPaths,
-                            onSegment: { segment in
-                                req.eventLoop.execute {
-                                    let output: String
-                                    switch responseFormat {
-                                    case .json:
-                                        let jsonSegment = ["text": segment]
-                                        if let jsonData = try? JSONSerialization.data(withJSONObject: jsonSegment),
-                                           let jsonString = String(data: jsonData, encoding: .utf8) {
-                                            output = jsonString + "\n"
-                                        } else {
-                                            output = ""
+                                onSegment: { segment in
+                                    req.eventLoop.execute {
+                                        let output: String
+                                        switch responseFormat {
+                                        case .json:
+                                            let jsonSegment = ["text": segment]
+                                            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonSegment),
+                                               let jsonString = String(data: jsonData, encoding: .utf8) {
+                                                output = jsonString + "\n"
+                                            } else {
+                                                output = ""
+                                            }
+                                        default: // text
+                                            output = segment
                                         }
-                                    default: // text
-                                        output = segment
-                                    }
-                                    
-                                    // Format output based on streaming method
-                                    let finalOutput = self.wrapForSSE(output, enabled: useSSE)
-                                    var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
-                                    buffer.writeString(finalOutput)
-                                    streamWriter.write(.buffer(buffer), promise: nil)
-                                    
-                                    // Regular chunk written
-                                }
-                            },
-                            onCompletion: {
-                                req.eventLoop.execute {
-                                    // Regular streaming completed
-                                    if useSSE {
-                                        // Send SSE end event
-                                        let endEvent = "event: end\ndata: \n\n"
-                                        var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
-                                        buffer.writeString(endEvent)
+
+                                        // Format output based on streaming method
+                                        let finalOutput = self.wrapForSSE(output, enabled: useSSE)
+                                        var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
+                                        buffer.writeString(finalOutput)
                                         streamWriter.write(.buffer(buffer), promise: nil)
-                                        // SSE end event written
+
+                                        // Regular chunk written
                                     }
+                                },
+                                onCompletion: {
+                                    req.eventLoop.execute {
+                                        // Regular streaming completed
+                                        if useSSE {
+                                            // Send SSE end event
+                                            let endEvent = "event: end\ndata: \n\n"
+                                            var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
+                                            buffer.writeString(endEvent)
+                                            streamWriter.write(.buffer(buffer), promise: nil)
+                                            // SSE end event written
+                                        }
+                                        streamWriter.write(.end, promise: nil)
+                                        // Stream ended, clean up temp file
+                                        try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                                    }
+                                }
+                            )
+                            if !success {
+                                req.eventLoop.execute {
                                     streamWriter.write(.end, promise: nil)
-                                    // Stream ended, clean up temp file
                                     try? FileManager.default.removeItem(at: tempFileURL) // Clean up
                                 }
                             }
-                        )
-                        if !success {
-                            req.eventLoop.execute {
-                                streamWriter.write(.end, promise: nil)
-                                try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                        case .fluid:
+                            // Do the work asynchronously, then emit a single chunk
+                            Task {
+                                defer {
+                                    req.eventLoop.execute {
+                                        if useSSE {
+                                            let endEvent = "event: end\ndata: \n\n"
+                                            var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
+                                            buffer.writeString(endEvent)
+                                            streamWriter.write(.buffer(buffer), promise: nil)
+                                        }
+                                        streamWriter.write(.end, promise: nil)
+                                        try? FileManager.default.removeItem(at: tempFileURL)
+                                    }
+                                }
+
+                                if let transcription = await FluidTranscriptionService.transcribeText(at: tempFileURL, language: whisperReq.model ?? whisperReq.language) {
+                                    let trimmed = transcription.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    let output: String
+                                    switch responseFormat {
+                                    case .json:
+                                        if trimmed.isEmpty {
+                                            let jsonResponse: [String: Any] = ["error": "Empty transcription", "text": ""]
+                                            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
+                                               let jsonString = String(data: jsonData, encoding: .utf8) {
+                                                output = jsonString + "\n"
+                                            } else {
+                                                output = "{\"error\":\"Empty transcription\",\"text\":\"\"}\n"
+                                            }
+                                        } else {
+                                            let jsonResponse = ["text": trimmed]
+                                            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
+                                               let jsonString = String(data: jsonData, encoding: .utf8) {
+                                                output = jsonString + "\n"
+                                            } else {
+                                                output = "\n"
+                                            }
+                                        }
+                                    default:
+                                        output = trimmed.isEmpty ? "No speech detected\n" : (trimmed + "\n")
+                                    }
+
+                                    let finalOutput = self.wrapForSSE(output, enabled: useSSE)
+                                    req.eventLoop.execute {
+                                        var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
+                                        buffer.writeString(finalOutput)
+                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                    }
+                                } else {
+                                    let errorJSON = "{\"error\": \"Transcription failed\"}\n"
+                                    let finalOutput = self.wrapForSSE(errorJSON, enabled: useSSE)
+                                    req.eventLoop.execute {
+                                        var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
+                                        buffer.writeString(finalOutput)
+                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                    }
+                                }
                             }
                         }
                     })
-                    var headers = HTTPHeaders()
-                    if useSSE {
-                        headers.add(name: "Content-Type", value: "text/event-stream")
-                        headers.add(name: "Cache-Control", value: "no-cache")
-                        headers.add(name: "Connection", value: "keep-alive")
-                        headers.add(name: "Access-Control-Allow-Origin", value: "*")
-                    } else {
-                        headers.add(name: "Content-Type", value: self.contentType(for: responseFormat))
-                    }
+                    let headers = self.buildHeaders(useSSE: useSSE, format: responseFormat)
                     return Response(status: .ok, headers: headers, body: body)
                 }
             } else {
@@ -310,6 +398,11 @@ final class VaporServer {
                 // Handle subtitle formats that need timestamps
                 switch responseFormat {
                 case .srt, .vtt, .verboseJson:
+                    guard provider == .whisper else {
+                        responseBody = "{\"error\": \"FluidAudio provider supports only json/text formats\"}"
+                        contentType = self.contentType(for: .json)
+                        break
+                    }
                     if let segments = WhisperTranscriptionService.transcribeAudioWithTimestamps(
                         at: tempFileURL, language: whisperReq.language, prompt: whisperReq.prompt, modelPaths: modelPaths
                     ) {
@@ -332,31 +425,58 @@ final class VaporServer {
                         contentType = self.contentType(for: .json)
                     }
                 case .json, .text:
-                    // Handle regular formats (json, text) - use faster transcription without timestamps
-                    if let transcription = WhisperTranscriptionService.transcribeAudio(
-                        at: tempFileURL, language: whisperReq.language, prompt: whisperReq.prompt, modelPaths: modelPaths
-                    ) {
-                        switch responseFormat {
-                        case .json:
-                            let jsonResponse = ["text": transcription]
-                            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
-                               let jsonString = String(data: jsonData, encoding: .utf8) {
-                                responseBody = jsonString
-                                contentType = self.contentType(for: .json)
-                            } else {
-                                responseBody = "{\"error\": \"Failed to create JSON response.\"}"
-                                contentType = self.contentType(for: .json)
+                    // Handle regular formats (json, text)
+                    switch provider {
+                    case .whisper:
+                        if let transcription = WhisperTranscriptionService.transcribeAudio(
+                            at: tempFileURL, language: whisperReq.language, prompt: whisperReq.prompt, modelPaths: modelPaths
+                        ) {
+                            switch responseFormat {
+                            case .json:
+                                let jsonResponse = ["text": transcription]
+                                if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
+                                   let jsonString = String(data: jsonData, encoding: .utf8) {
+                                    responseBody = jsonString
+                                    contentType = self.contentType(for: .json)
+                                } else {
+                                    responseBody = "{\"error\": \"Failed to create JSON response.\"}"
+                                    contentType = self.contentType(for: .json)
+                                }
+                            case .text:
+                                responseBody = transcription
+                                contentType = self.contentType(for: .text)
+                            default:
+                                responseBody = "Unsupported response format"
+                                contentType = self.contentType(for: .text)
                             }
-                        case .text:
-                            responseBody = transcription
-                            contentType = self.contentType(for: .text)
-                        default:
-                            responseBody = "Unsupported response format"
-                            contentType = self.contentType(for: .text)
+                        } else {
+                            responseBody = "{\"error\": \"Transcription failed\"}"
+                            contentType = self.contentType(for: .json)
                         }
-                    } else {
-                        responseBody = "{\"error\": \"Transcription failed\"}"
-                        contentType = self.contentType(for: .json)
+                    case .fluid:
+                        if let transcription = await FluidTranscriptionService.transcribeText(at: tempFileURL, language: whisperReq.model ?? whisperReq.language) {
+                            switch responseFormat {
+                            case .json:
+                                let jsonResponse = ["text": transcription]
+                                if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
+                                   let jsonString = String(data: jsonData, encoding: .utf8) {
+                                    responseBody = jsonString
+                                    contentType = self.contentType(for: .json)
+                                } else {
+                                    responseBody = "{\"error\": \"Failed to create JSON response.\"}"
+                                    contentType = self.contentType(for: .json)
+                                }
+                            case .text:
+                                responseBody = transcription
+                                contentType = self.contentType(for: .text)
+                            default:
+                                responseBody = "Unsupported response format"
+                                contentType = self.contentType(for: .text)
+                            }
+                        } else {
+                            responseBody = "{\"error\": \"Transcription failed\"}"
+                            contentType = self.contentType(for: .json)
+                        }
                     }
                 }
                 
