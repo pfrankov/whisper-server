@@ -9,7 +9,6 @@
 /* Begin PBXBuildFile section */
 		8D121C872DF89FC200F25B13 /* Vapor in Frameworks */ = {isa = PBXBuildFile; productRef = 8D121C862DF89FC200F25B13 /* Vapor */; };
 		8D223B2E2E75EB4E00DF9D06 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 8D223B2D2E75EB4E00DF9D06 /* FluidAudio */; };
-		/* removed 8D223B302E75EB4E00DF9D06 fluidaudio in Frameworks */
 		8D28D83B2D93739300079B61 /* whisper.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8D28D83A2D93739300079B61 /* whisper.xcframework */; };
 		8D28D83C2D93739300079B61 /* whisper.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 8D28D83A2D93739300079B61 /* whisper.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -635,7 +634,6 @@
 			package = 8D223B2C2E75EB4E00DF9D06 /* XCRemoteSwiftPackageReference "FluidAudio" */;
 			productName = FluidAudio;
 		};
-		/* removed XCSwiftPackageProductDependency fluidaudio */
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8DE541BD2D919CCF0015BF48 /* Project object */;
