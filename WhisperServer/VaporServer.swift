@@ -73,9 +73,15 @@ final class VaporServer {
     /// Supported providers
     private enum Provider: String { case whisper, fluid }
 
-    /// Parses response format string to enum with safe default
-    private func parseResponseFormat(_ raw: String?) -> WhisperSubtitleFormatter.ResponseFormat {
-        WhisperSubtitleFormatter.ResponseFormat(rawValue: raw ?? "") ?? .json
+    /// Parses response format string, returning json as default when nil
+    /// - Throws: Abort(.badRequest) for unsupported formats provided by the client
+    private func parseResponseFormat(_ raw: String?) throws -> WhisperSubtitleFormatter.ResponseFormat {
+        guard let raw = raw else { return .json }
+        print("📦 parseResponseFormat called with \(raw)")
+        if let format = WhisperSubtitleFormatter.ResponseFormat(rawValue: raw) {
+            return format
+        }
+        throw Abort(.badRequest, reason: "Unsupported response_format '\(raw)'")
     }
 
     /// Maps response format to content-type when not using SSE
@@ -124,6 +130,29 @@ final class VaporServer {
         }
         return headers
     }
+    /// Writes a text chunk to the stream, wrapping as SSE if needed
+    private func writeChunk(_ output: String, req: Request, useSSE: Bool, writer: (ByteBuffer) -> Void) {
+        let finalOutput = self.wrapForSSE(output, enabled: useSSE)
+        var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
+        buffer.writeString(finalOutput)
+        writer(buffer)
+    }
+
+    /// Finishes the streaming response, optionally emitting SSE end event, then executes cleanup
+    private func finishStream(req: Request, useSSE: Bool, writer: (String) -> Void, end: () -> Void, cleanup: @escaping () -> Void) {
+        if useSSE {
+            let endEvent = "event: end\ndata: \n\n"
+            writer(endEvent)
+        }
+        end()
+        cleanup()
+    }
+
+    /// Encodes a JSON object to String (UTF-8). Returns nil on failure.
+    private func jsonString(_ object: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(object) else { return nil }
+        return (try? JSONSerialization.data(withJSONObject: object)).flatMap { String(data: $0, encoding: .utf8) }
+    }
 
     /// Ensures the requested Whisper model is available and resets the context if needed
     private func prepareWhisperModelForRequest(_ requestedModelID: String?) async throws -> (binPath: URL, encoderDir: URL) {
@@ -168,9 +197,42 @@ final class VaporServer {
             // Write the file buffer to the temporary path
             try await req.fileio.writeFile(whisperReq.file.data, at: tempFileURL.path)
             
-            let responseFormat = self.parseResponseFormat(whisperReq.response_format)
+            // Ensure temp file is cleaned on early error paths; disabled for streaming below
+            var shouldCleanupTempFileOnExit = true
+            let isStreaming = (whisperReq.stream == true)
+            if isStreaming {
+                // Streaming responses manage cleanup on completion
+                shouldCleanupTempFileOnExit = false
+            }
+            defer {
+                if shouldCleanupTempFileOnExit {
+                    try? FileManager.default.removeItem(at: tempFileURL)
+                }
+            }
+            
+            let responseFormat: WhisperSubtitleFormatter.ResponseFormat
+            do {
+                responseFormat = try self.parseResponseFormat(whisperReq.response_format)
+            } catch {
+                try? FileManager.default.removeItem(at: tempFileURL)
+                throw error
+            }
             let requestedModelID = whisperReq.model?.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedModelID = (requestedModelID?.isEmpty ?? true) ? nil : requestedModelID
+
+            // Early preflight: ensure the requested model (if any) exists across Fluid and Whisper catalogs
+            let isKnownFluid = (normalizedModelID != nil) && (FluidTranscriptionService.modelDescriptor(for: normalizedModelID!) != nil)
+            let isKnownWhisper = (normalizedModelID != nil) && (modelManager.availableModels.contains {
+                $0.id.caseInsensitiveCompare(normalizedModelID!) == .orderedSame ||
+                $0.name.caseInsensitiveCompare(normalizedModelID!) == .orderedSame
+            })
+            if let requested = normalizedModelID, !(isKnownFluid || isKnownWhisper) {
+                let errorBody = "{\"error\": \"Model '\(requested)' is not available\"}"
+                var headers = HTTPHeaders()
+                headers.add(name: "Content-Type", value: self.contentType(for: .json))
+                try? FileManager.default.removeItem(at: tempFileURL)
+                return Response(status: .badRequest, headers: headers, body: .init(string: errorBody))
+            }
 
             var provider: Provider
             var whisperModelID: String? = nil
@@ -232,6 +294,12 @@ final class VaporServer {
                     // Timestamp streaming mode
                     var segmentCounter = 0
                     let body = Response.Body(stream: { streamWriter in
+                        if useSSE {
+                            let prelude = ":ok\n\n"
+                            var buffer = req.byteBufferAllocator.buffer(capacity: prelude.utf8.count)
+                            buffer.writeString(prelude)
+                            streamWriter.write(.buffer(buffer), promise: nil)
+                        }
                         let success = WhisperTranscriptionService.transcribeAudioStreamWithTimestamps(
                             at: tempFileURL,
                             language: whisperReq.language,
@@ -266,21 +334,15 @@ final class VaporServer {
                                             "end": segment.endTime,
                                             "text": segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
                                         ]
-                                        if let jsonData = try? JSONSerialization.data(withJSONObject: segmentDict),
-                                           let jsonString = String(data: jsonData, encoding: .utf8) {
-                                            output = jsonString + "\n"
-                                        } else {
-                                            output = ""
-                                        }
+                                        output = (self.jsonString(segmentDict) ?? "") + "\n"
                                     default:
                                         output = segment.text
                                     }
                                     
                                     // Format output based on streaming method
-                                    let finalOutput = self.wrapForSSE(output, enabled: useSSE)
-                                    var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
-                                    buffer.writeString(finalOutput)
-                                    streamWriter.write(.buffer(buffer), promise: nil)
+                                    self.writeChunk(output, req: req, useSSE: useSSE) { buffer in
+                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                    }
                                     
                                     // Chunk written
                                 }
@@ -288,24 +350,41 @@ final class VaporServer {
                             onCompletion: {
                                 req.eventLoop.execute {
                                     // Streaming completed
-                                    if useSSE {
-                                        // Send SSE end event
-                                        let endEvent = "event: end\ndata: \n\n"
-                                        var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
-                                        buffer.writeString(endEvent)
-                                        streamWriter.write(.buffer(buffer), promise: nil)
-                                        // SSE end event written
-                                    }
-                                    streamWriter.write(.end, promise: nil)
-                                    // Stream ended, clean up temp file
-                                    try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                                    self.finishStream(
+                                        req: req,
+                                        useSSE: useSSE,
+                                        writer: { str in
+                                            var buffer = req.byteBufferAllocator.buffer(capacity: str.utf8.count)
+                                            buffer.writeString(str)
+                                            streamWriter.write(.buffer(buffer), promise: nil)
+                                        },
+                                        end: {
+                                            streamWriter.write(.end, promise: nil)
+                                        },
+                                        cleanup: {
+                                            try? FileManager.default.removeItem(at: tempFileURL)
+                                        }
+                                    )
                                 }
                             }
                         )
                         if !success {
                             req.eventLoop.execute {
-                                streamWriter.write(.end, promise: nil)
-                                try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                                self.finishStream(
+                                    req: req,
+                                    useSSE: useSSE,
+                                    writer: { str in
+                                        var buffer = req.byteBufferAllocator.buffer(capacity: str.utf8.count)
+                                        buffer.writeString(str)
+                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                    },
+                                    end: {
+                                        streamWriter.write(.end, promise: nil)
+                                    },
+                                    cleanup: {
+                                        try? FileManager.default.removeItem(at: tempFileURL)
+                                    }
+                                )
                             }
                         }
                     })
@@ -315,6 +394,12 @@ final class VaporServer {
                     // Streaming contract: send chunks as they are ready.
                     // For FluidAudio we will send a single chunk when final result is ready, then close.
                     let body = Response.Body(stream: { streamWriter in
+                        if useSSE {
+                            let prelude = ":ok\n\n"
+                            var buffer = req.byteBufferAllocator.buffer(capacity: prelude.utf8.count)
+                            buffer.writeString(prelude)
+                            streamWriter.write(.buffer(buffer), promise: nil)
+                        }
                         switch provider {
                         case .whisper:
                             let success = WhisperTranscriptionService.transcribeAudioStream(
@@ -328,21 +413,15 @@ final class VaporServer {
                                         switch responseFormat {
                                         case .json:
                                             let jsonSegment = ["text": segment]
-                                            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonSegment),
-                                               let jsonString = String(data: jsonData, encoding: .utf8) {
-                                                output = jsonString + "\n"
-                                            } else {
-                                                output = ""
-                                            }
+                                            output = (self.jsonString(jsonSegment) ?? "") + "\n"
                                         default: // text
                                             output = segment
                                         }
 
                                         // Format output based on streaming method
-                                        let finalOutput = self.wrapForSSE(output, enabled: useSSE)
-                                        var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
-                                        buffer.writeString(finalOutput)
-                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                        self.writeChunk(output, req: req, useSSE: useSSE) { buffer in
+                                            streamWriter.write(.buffer(buffer), promise: nil)
+                                        }
 
                                         // Regular chunk written
                                     }
@@ -350,24 +429,41 @@ final class VaporServer {
                                 onCompletion: {
                                     req.eventLoop.execute {
                                         // Regular streaming completed
-                                        if useSSE {
-                                            // Send SSE end event
-                                            let endEvent = "event: end\ndata: \n\n"
-                                            var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
-                                            buffer.writeString(endEvent)
-                                            streamWriter.write(.buffer(buffer), promise: nil)
-                                            // SSE end event written
-                                        }
-                                        streamWriter.write(.end, promise: nil)
-                                        // Stream ended, clean up temp file
-                                        try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                                        self.finishStream(
+                                            req: req,
+                                            useSSE: useSSE,
+                                            writer: { str in
+                                                var buffer = req.byteBufferAllocator.buffer(capacity: str.utf8.count)
+                                                buffer.writeString(str)
+                                                streamWriter.write(.buffer(buffer), promise: nil)
+                                            },
+                                            end: {
+                                                streamWriter.write(.end, promise: nil)
+                                            },
+                                            cleanup: {
+                                                try? FileManager.default.removeItem(at: tempFileURL)
+                                            }
+                                        )
                                     }
                                 }
                             )
                             if !success {
                                 req.eventLoop.execute {
-                                    streamWriter.write(.end, promise: nil)
-                                    try? FileManager.default.removeItem(at: tempFileURL) // Clean up
+                                    self.finishStream(
+                                        req: req,
+                                        useSSE: useSSE,
+                                        writer: { str in
+                                            var buffer = req.byteBufferAllocator.buffer(capacity: str.utf8.count)
+                                            buffer.writeString(str)
+                                            streamWriter.write(.buffer(buffer), promise: nil)
+                                        },
+                                        end: {
+                                            streamWriter.write(.end, promise: nil)
+                                        },
+                                        cleanup: {
+                                            try? FileManager.default.removeItem(at: tempFileURL)
+                                        }
+                                    )
                                 }
                             }
                         case .fluid:
@@ -377,14 +473,21 @@ final class VaporServer {
                                 let selectedLanguage = fluidLanguage
                                 defer {
                                     req.eventLoop.execute {
-                                        if useSSE {
-                                            let endEvent = "event: end\ndata: \n\n"
-                                            var buffer = req.byteBufferAllocator.buffer(capacity: endEvent.utf8.count)
-                                            buffer.writeString(endEvent)
-                                            streamWriter.write(.buffer(buffer), promise: nil)
-                                        }
-                                        streamWriter.write(.end, promise: nil)
-                                        try? FileManager.default.removeItem(at: tempFileURL)
+                                        self.finishStream(
+                                            req: req,
+                                            useSSE: useSSE,
+                                            writer: { str in
+                                                var buffer = req.byteBufferAllocator.buffer(capacity: str.utf8.count)
+                                                buffer.writeString(str)
+                                                streamWriter.write(.buffer(buffer), promise: nil)
+                                            },
+                                            end: {
+                                                streamWriter.write(.end, promise: nil)
+                                            },
+                                            cleanup: {
+                                                try? FileManager.default.removeItem(at: tempFileURL)
+                                            }
+                                        )
                                     }
                                 }
 
@@ -418,19 +521,17 @@ final class VaporServer {
                                         output = trimmed.isEmpty ? "No speech detected\n" : (trimmed + "\n")
                                     }
 
-                                    let finalOutput = self.wrapForSSE(output, enabled: useSSE)
                                     req.eventLoop.execute {
-                                        var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
-                                        buffer.writeString(finalOutput)
-                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                        self.writeChunk(output, req: req, useSSE: useSSE) { buffer in
+                                            streamWriter.write(.buffer(buffer), promise: nil)
+                                        }
                                     }
                                 } else {
                                     let errorJSON = "{\"error\": \"Transcription failed\"}\n"
-                                    let finalOutput = self.wrapForSSE(errorJSON, enabled: useSSE)
                                     req.eventLoop.execute {
-                                        var buffer = req.byteBufferAllocator.buffer(capacity: finalOutput.utf8.count)
-                                        buffer.writeString(finalOutput)
-                                        streamWriter.write(.buffer(buffer), promise: nil)
+                                        self.writeChunk(errorJSON, req: req, useSSE: useSSE) { buffer in
+                                            streamWriter.write(.buffer(buffer), promise: nil)
+                                        }
                                     }
                                 }
                             }

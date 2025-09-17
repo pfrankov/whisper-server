@@ -94,11 +94,4 @@ struct FluidTranscriptionService {
 
     // Intentionally left empty for this integration: AsrModels handles model download
 
-    /// Convert language code to Locale with a reasonable default
-    private static func normalizedLocale(from language: String?) -> Locale {
-        if let language, !language.isEmpty {
-            return Locale(identifier: language)
-        }
-        return Locale.current
-    }
 }

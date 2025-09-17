@@ -1,12 +1,10 @@
 #!/bin/bash
 
 # Whisper Server API Test Script
-# Tests OpenAI Whisper API compatibility using curl
-# Author: Valera the Ex-Designer Turned Plumber Turned IT Guy
+# Strengthened validations for Whisper/Fluid providers
 
-set -e
+set -euo pipefail
 
-# Configuration
 SERVER_URL="http://localhost:12017"
 TEST_AUDIO="jfk.wav"
 
@@ -16,349 +14,818 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-echo -e "${BLUE}🔧 WhisperServer API Test Suite${NC}"
-echo -e "${BLUE}Testing OpenAI Whisper API compatibility + SSE Streaming${NC}"
-echo ""
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MODELS_JSON_PATH="$SCRIPT_DIR/WhisperServer/Models.json"
+FLUID_SOURCE_PATH="$SCRIPT_DIR/WhisperServer/FluidTranscriptionService.swift"
 
-# Check if test audio file exists
-if [ ! -f "$TEST_AUDIO" ]; then
-    echo -e "${RED}❌ Test audio file '$TEST_AUDIO' not found!${NC}"
-    echo -e "${YELLOW}💡 You can download test audio with:${NC}"
-    echo "   curl -O https://github.com/openai/whisper/raw/main/tests/jfk.wav"
-    exit 1
+WHISPER_MODELS=()
+if [ -f "$MODELS_JSON_PATH" ]; then
+    export MODELS_JSON_PATH
+    while IFS= read -r line; do
+        [ -n "$line" ] && WHISPER_MODELS+=("$line")
+    done < <(
+        python3 - <<'PY'
+import json, os
+path = os.environ.get("MODELS_JSON_PATH")
+if not path or not os.path.exists(path):
+    raise SystemExit
+with open(path, "r", encoding="utf-8") as handle:
+    try:
+        data = json.load(handle)
+    except Exception:
+        raise SystemExit
+for model in data:
+    mid = model.get("id")
+    if mid:
+        print(mid)
+PY
+    )
+    unset MODELS_JSON_PATH
 fi
 
-# Check if server is running
-echo -e "${YELLOW}🔍 Checking if server is running...${NC}"
-if ! curl -s --connect-timeout 5 "$SERVER_URL/v1/audio/transcriptions" > /dev/null 2>&1; then
-    echo -e "${RED}❌ Server is not running on $SERVER_URL${NC}"
-    echo -e "${YELLOW}💡 Start the app first, then run this script again${NC}"
-    exit 1
+if [ -n "${WHISPER_MODELS_OVERRIDE:-}" ]; then
+    IFS=',' read -r -a WHISPER_MODELS <<< "$WHISPER_MODELS_OVERRIDE"
 fi
 
-echo -e "${GREEN}✅ Server is responding${NC}"
-echo ""
+if [ ${#WHISPER_MODELS[@]} -eq 0 ]; then
+    WHISPER_MODELS=("tiny-q5_1")
+fi
 
-# Test function
-run_test() {
-    local test_name="$1"
-    local curl_cmd="$2"
-    local expected_check="$3"
-    
-    echo -e "${BLUE}🧪 Testing: $test_name${NC}"
-    echo -e "${YELLOW}Command: $curl_cmd${NC}"
-    
-    response=$(eval "$curl_cmd" 2>&1)
-    exit_code=$?
-    
-    if [ $exit_code -eq 0 ]; then
-        if eval "$expected_check"; then
-            echo -e "${GREEN}✅ PASS: $test_name${NC}"
-        else
-            echo -e "${RED}❌ FAIL: $test_name - Response validation failed${NC}"
-            echo -e "${RED}Response: $response${NC}"
-        fi
-    else
-        echo -e "${RED}❌ FAIL: $test_name - Request failed${NC}"
-        echo -e "${RED}Error: $response${NC}"
+FLUID_MODELS=()
+if [ -f "$FLUID_SOURCE_PATH" ]; then
+    export FLUID_SOURCE_PATH
+    while IFS= read -r line; do
+        [ -n "$line" ] && FLUID_MODELS+=("$line")
+    done < <(
+        python3 - <<'PY'
+import os, re
+path = os.environ.get("FLUID_SOURCE_PATH")
+if not path or not os.path.exists(path):
+    raise SystemExit
+pattern = re.compile(r'ModelDescriptor\(\s*id:\s*"([^"]+)"')
+with open(path, 'r', encoding='utf-8') as handle:
+    for raw in handle:
+        match = pattern.search(raw)
+        if match:
+            print(match.group(1))
+PY
+    )
+    unset FLUID_SOURCE_PATH
+fi
+
+if [ -n "${FLUID_MODELS_OVERRIDE:-}" ]; then
+    IFS=',' read -r -a FLUID_MODELS <<< "$FLUID_MODELS_OVERRIDE"
+fi
+
+TEST_FAILURES=0
+LAST_BODY=""
+LAST_STATUS=""
+LAST_HEADERS=""
+CURL_ERROR=""
+
+render_command() {
+    local cmd="curl"
+    for arg in "$@"; do
+        local escaped=${arg//"/\\"}
+        cmd+=" \"$escaped\""
+    done
+    printf '%s' "$cmd"
+}
+
+record_pass() {
+    printf "%b✅ PASS:%b %s\n" "$GREEN" "$NC" "$1"
+}
+
+record_fail() {
+    TEST_FAILURES=1
+    printf "%b❌ FAIL:%b %s\n" "$RED" "$NC" "$1"
+    if [ -n "$2" ]; then
+        printf "   %s\n" "$2"
     fi
+}
+
+run_curl_basic() {
+    set +e
+    local response
+    response=$(curl -sS -w '\n%{http_code}' "$@" 2>&1)
+    local exit_code=$?
+    set -e
+    if [ $exit_code -ne 0 ]; then
+        CURL_ERROR="$response"
+        LAST_BODY=""
+        LAST_STATUS=""
+        return 1
+    fi
+    LAST_STATUS="${response##*$'\n'}"
+    LAST_BODY="${response%$'\n'$LAST_STATUS}"
+    CURL_ERROR=""
+    return 0
+}
+
+run_curl_with_headers() {
+    local header_file
+    header_file=$(mktemp)
+    set +e
+    local response
+    response=$(curl -sS -D "$header_file" -w '\n%{http_code}' "$@" 2>&1)
+    local exit_code=$?
+    set -e
+    if [ $exit_code -ne 0 ]; then
+        CURL_ERROR="$response"
+        LAST_BODY=""
+        LAST_STATUS=""
+        LAST_HEADERS=""
+        rm -f "$header_file"
+        return 1
+    fi
+    LAST_STATUS="${response##*$'\n'}"
+    LAST_BODY="${response%$'\n'$LAST_STATUS}"
+    LAST_HEADERS=$(tr -d '\r' < "$header_file")
+    CURL_ERROR=""
+    rm -f "$header_file"
+    return 0
+}
+
+validate_json_text() {
+    BODY="$LAST_BODY" python3 - <<'PY'
+import json, os, sys
+body = os.environ.get("BODY", "")
+try:
+    data = json.loads(body)
+except Exception as exc:
+    print(f"JSON decode failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+text = data.get("text")
+if not isinstance(text, str) or not text.strip():
+    print("Field 'text' missing or empty", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+validate_text_plain() {
+    local trimmed
+    trimmed=$(printf '%s' "$LAST_BODY" | tr -d '\r')
+    if [ -z "${trimmed//[[:space:]]/}" ]; then
+        printf 'Plain text body is empty\n' >&2
+        return 1
+    fi
+    if [[ $trimmed == \{* ]]; then
+        printf 'Plain text response unexpectedly looks like JSON\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+validate_verbose_json() {
+    BODY="$LAST_BODY" python3 - <<'PY'
+import json, os, sys
+body = os.environ.get("BODY", "")
+try:
+    data = json.loads(body)
+except Exception as exc:
+    print(f"Verbose JSON decode failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+if "text" not in data or not isinstance(data["text"], str):
+    print("Verbose JSON missing 'text' field", file=sys.stderr)
+    sys.exit(1)
+segments = data.get("segments")
+if not isinstance(segments, list) or not segments:
+    print("Verbose JSON missing non-empty 'segments' array", file=sys.stderr)
+    sys.exit(1)
+for idx, seg in enumerate(segments):
+    if not isinstance(seg, dict):
+        print(f"Segment {idx} is not an object", file=sys.stderr)
+        sys.exit(1)
+    for key in ("start", "end", "text"):
+        if key not in seg:
+            print(f"Segment {idx} missing '{key}'", file=sys.stderr)
+            sys.exit(1)
+    if not isinstance(seg["text"], str) or not seg["text"].strip():
+        print(f"Segment {idx} has empty text", file=sys.stderr)
+        sys.exit(1)
+sys.exit(0)
+PY
+}
+
+validate_json_error() {
+    BODY="$LAST_BODY" python3 - <<'PY'
+import json, os, sys
+body = os.environ.get("BODY", "")
+try:
+    data = json.loads(body)
+except Exception as exc:
+    print(f"Error JSON decode failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+err = data.get("error")
+reason = data.get("reason")
+if isinstance(err, str) and err.strip():
+    sys.exit(0)
+if isinstance(err, bool) and err:
+    if isinstance(reason, str) and reason.strip():
+        sys.exit(0)
+    print("Error response missing non-empty 'reason'", file=sys.stderr)
+    sys.exit(1)
+print("Error response missing 'error' field", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
+validate_srt_plain() {
+    if [[ $LAST_BODY != *"-->"* ]]; then
+        printf 'SRT body missing timestamp separator\n' >&2
+        return 1
+    fi
+    if [[ $LAST_BODY != *"00:"* ]]; then
+        printf 'SRT body missing hours marker\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+validate_vtt_plain() {
+    if [[ $LAST_BODY != WEBVTT* ]]; then
+        printf 'VTT body missing WEBVTT header\n' >&2
+        return 1
+    fi
+    if [[ $LAST_BODY != *"-->"* ]]; then
+        printf 'VTT body missing timestamp separator\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+validate_chunked_text() {
+    local content="$LAST_BODY"
+    if [ -z "${content//[[:space:]]/}" ]; then
+        printf 'Chunked fallback body is empty\n' >&2
+        return 1
+    fi
+    if [[ $content == *"event:"* ]] || [[ $content == *"data:"* ]]; then
+        printf 'Chunked fallback unexpectedly contains SSE framing\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+validate_sse_stream() {
+    local expected="$1"
+    BODY="$LAST_BODY" python3 - "$expected" <<'PY'
+import json, os, sys
+body = os.environ.get("BODY", "")
+expected = sys.argv[1]
+if not body.endswith("\n"):
+    print("SSE body must end with newline", file=sys.stderr)
+    sys.exit(1)
+lines = body.splitlines()
+if not lines or lines[0].strip() != ':ok':
+    print("SSE missing ':ok' prelude", file=sys.stderr)
+    sys.exit(1)
+if len(lines) < 3 or lines[1] != "":
+    print("SSE prelude missing blank line", file=sys.stderr)
+    sys.exit(1)
+found_end = False
+data_lines = []
+for line in lines[2:]:
+    if not line:
+        continue
+    if line.startswith('event: end'):
+        found_end = True
+        continue
+    if found_end:
+        if line != 'data: ':
+            print("Unexpected content after end event", file=sys.stderr)
+            sys.exit(1)
+    else:
+        if not line.startswith('data: '):
+            print(f"Unexpected line before end event: {line}", file=sys.stderr)
+            sys.exit(1)
+        data_lines.append(line[6:])
+if not found_end:
+    print("SSE missing end event", file=sys.stderr)
+    sys.exit(1)
+filtered = [payload for payload in data_lines if payload.strip()]
+if not filtered:
+    print("SSE stream contains no meaningful data events", file=sys.stderr)
+    sys.exit(1)
+if expected == 'text':
+    for idx, payload in enumerate(filtered):
+        if payload.lstrip().startswith('{'):
+            print("Text SSE payload unexpectedly JSON", file=sys.stderr)
+            sys.exit(1)
+elif expected == 'json':
+    for payload in filtered:
+        try:
+            obj = json.loads(payload)
+        except Exception as exc:
+            print(f"JSON SSE payload decode failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if 'text' not in obj:
+            print("JSON SSE payload missing 'text'", file=sys.stderr)
+            sys.exit(1)
+elif expected == 'srt':
+    joined = "\n".join(filtered)
+    if '-->' not in joined:
+        print("SRT SSE payload missing timestamp", file=sys.stderr)
+        sys.exit(1)
+elif expected == 'vtt':
+    if not filtered[0].startswith('WEBVTT'):
+        print("VTT SSE payload missing WEBVTT header", file=sys.stderr)
+        sys.exit(1)
+    if not any('-->' in payload for payload in filtered):
+        print("VTT SSE payload missing timestamp", file=sys.stderr)
+        sys.exit(1)
+elif expected == 'verbose_json':
+    for payload in filtered:
+        try:
+            obj = json.loads(payload)
+        except Exception as exc:
+            print(f"Verbose JSON SSE decode failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        for key in ('start', 'end', 'text'):
+            if key not in obj:
+                print(f"Verbose JSON SSE missing '{key}'", file=sys.stderr)
+                sys.exit(1)
+else:
+    print(f"Unknown SSE expectation '{expected}'", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+validate_sse_text() { validate_sse_stream "text"; }
+validate_sse_json() { validate_sse_stream "json"; }
+validate_sse_srt() { validate_sse_stream "srt"; }
+validate_sse_vtt() { validate_sse_stream "vtt"; }
+validate_sse_verbose() { validate_sse_stream "verbose_json"; }
+
+ensure_content_type() {
+    local expected="$1"
+    local headers="$LAST_HEADERS"
+    if [[ $headers != *"Content-Type: ${expected}"* ]]; then
+        printf 'Expected Content-Type %s but got:\n%s\n' "$expected" "$headers" >&2
+        return 1
+    fi
+    return 0
+}
+
+ensure_not_sse_header() {
+    if [[ $LAST_HEADERS == *"text/event-stream"* ]]; then
+        printf 'Expected non-SSE response but got text/event-stream\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+run_http_test() {
+    local name="$1"
+    local expected_status="$2"
+    local validator="$3"
+    shift 3
+    local command
+    command=$(render_command "$@")
+    echo -e "${BLUE}🧪 Testing: $name${NC}"
+    echo -e "${YELLOW}Command: $command${NC}"
+    if ! run_curl_basic "$@"; then
+        record_fail "$name" "curl failed: $CURL_ERROR"
+        echo ""
+        return
+    fi
+    if [ "$LAST_STATUS" != "$expected_status" ]; then
+        record_fail "$name" "Expected HTTP $expected_status, got $LAST_STATUS"
+        echo ""
+        return
+    fi
+    if ! $validator; then
+        record_fail "$name" "Body validation failed"
+        echo "   Response: $LAST_BODY"
+        echo ""
+        return
+    fi
+    record_pass "$name"
     echo ""
 }
 
-# SSE Test function
+run_http_test_with_headers() {
+    local name="$1"
+    local expected_status="$2"
+    local validator="$3"
+    local expected_ct="$4"
+    shift 4
+    local command
+    command=$(render_command "$@")
+    echo -e "${BLUE}🧪 Testing: $name${NC}"
+    echo -e "${YELLOW}Command: $command${NC}"
+    if ! run_curl_with_headers "$@"; then
+        record_fail "$name" "curl failed: $CURL_ERROR"
+        echo ""
+        return
+    fi
+    if [ "$LAST_STATUS" != "$expected_status" ]; then
+        record_fail "$name" "Expected HTTP $expected_status, got $LAST_STATUS"
+        echo ""
+        return
+    fi
+    if ! ensure_content_type "$expected_ct"; then
+        record_fail "$name" "Unexpected Content-Type"
+        echo "   Headers: $LAST_HEADERS"
+        echo ""
+        return
+    fi
+    if ! $validator; then
+        record_fail "$name" "Body validation failed"
+        echo "   Response: $LAST_BODY"
+        echo ""
+        return
+    fi
+    record_pass "$name"
+    echo ""
+}
+
+run_chunked_test() {
+    local name="$1"
+    local expected_ct="$2"
+    local validator="$3"
+    shift 3
+    local command
+    command=$(render_command "$@")
+    echo -e "${BLUE}🌊 Testing: $name${NC}"
+    echo -e "${YELLOW}Command: $command${NC}"
+    if ! run_curl_with_headers "$@"; then
+        record_fail "$name" "curl failed: $CURL_ERROR"
+        echo ""
+        return
+    fi
+    if [ "$LAST_STATUS" != "200" ]; then
+        record_fail "$name" "Expected HTTP 200, got $LAST_STATUS"
+        echo ""
+        return
+    fi
+    if ! ensure_content_type "$expected_ct"; then
+        record_fail "$name" "Unexpected Content-Type"
+        echo "   Headers: $LAST_HEADERS"
+        echo ""
+        return
+    fi
+    if ! ensure_not_sse_header; then
+        record_fail "$name" "Received SSE headers"
+        echo "   Headers: $LAST_HEADERS"
+        echo ""
+        return
+    fi
+    if ! $validator; then
+        record_fail "$name" "Body validation failed"
+        echo "   Response: $LAST_BODY"
+        echo ""
+        return
+    fi
+    record_pass "$name"
+    echo ""
+}
+
 run_sse_test() {
-    local test_name="$1"
-    local format="$2"
-    local accept_header="$3"
-    local expected_content_type="$4"
-    local validation_check="$5"
-    
-    echo -e "${PURPLE}🌊 Testing SSE: $test_name${NC}"
-    
-    # Get headers and response
-    temp_file=$(mktemp)
-    response=$(curl -s -D "$temp_file" -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -H "Accept: $accept_header" \
-        -F file=@$TEST_AUDIO \
-        -F response_format="$format" \
-        -F stream="true" \
-        --no-buffer 2>/dev/null)
-    
-    headers=$(cat "$temp_file")
-    rm "$temp_file"
-    
-    # Check content type
-    content_type=$(echo "$headers" | grep -i "content-type:" | head -1 | tr -d '\r')
-    
-    if [[ "$content_type" == *"$expected_content_type"* ]]; then
-        echo -e "${GREEN}✅ Content-Type correct: $content_type${NC}"
-        
-        # Validate response content
-        if eval "$validation_check"; then
-            echo -e "${GREEN}✅ PASS: $test_name${NC}"
-            echo -e "${YELLOW}   Sample output (first 3 lines):${NC}"
-            echo "$response" | head -3 | sed 's/^/   /'
-        else
-            echo -e "${RED}❌ FAIL: $test_name - Response validation failed${NC}"
-            echo -e "${RED}Response: $response${NC}"
-        fi
-    else
-        echo -e "${RED}❌ FAIL: $test_name - Wrong Content-Type${NC}"
-        echo -e "${RED}Expected: $expected_content_type, Got: $content_type${NC}"
+    local name="$1"
+    local validator="$2"
+    shift 2
+    local command
+    command=$(render_command "$@")
+    echo -e "${PURPLE}🌊 Testing SSE: $name${NC}"
+    echo -e "${YELLOW}Command: $command${NC}"
+    if ! run_curl_with_headers "$@"; then
+        record_fail "$name" "curl failed: $CURL_ERROR"
+        echo ""
+        return
+    fi
+    if [ "$LAST_STATUS" != "200" ]; then
+        record_fail "$name" "Expected HTTP 200, got $LAST_STATUS"
+        echo ""
+        return
+    fi
+    if [[ $LAST_HEADERS != *"Content-Type: text/event-stream"* ]]; then
+        record_fail "$name" "Missing text/event-stream header"
+        echo "   Headers: $LAST_HEADERS"
+        echo ""
+        return
+    fi
+    if ! $validator; then
+        record_fail "$name" "SSE payload validation failed"
+        echo "   Response (first lines):"
+        printf '   %s\n' "$(printf '%s' "$LAST_BODY" | head -n 6)"
+        echo ""
+        return
+    fi
+    record_pass "$name"
+    echo ""
+}
+
+check_server_ready() {
+    if [ ! -f "$TEST_AUDIO" ]; then
+        printf "%b❌ Test audio file '%s' not found!%b\n" "$RED" "$TEST_AUDIO" "$NC"
+        printf "%b💡 Download with:%b curl -O https://github.com/openai/whisper/raw/main/tests/jfk.wav\n" "$YELLOW" "$NC"
+        exit 1
+    fi
+
+    printf "%b🔍 Checking if server is running...%b\n" "$YELLOW" "$NC"
+    if ! curl -s --connect-timeout 5 "$SERVER_URL/v1/audio/transcriptions" > /dev/null 2>&1; then
+        printf "%b❌ Server is not running on %s%b\n" "$RED" "$SERVER_URL" "$NC"
+        printf "%b💡 Start the app first, then run this script again%b\n" "$YELLOW" "$NC"
+        exit 1
+    fi
+    printf "%b✅ Server is responding%b\n\n" "$GREEN" "$NC"
+}
+
+print_banner() {
+    printf "%b🔧 WhisperServer API Test Suite%b\n" "$BLUE" "$NC"
+    printf "%bTesting OpenAI Whisper API compatibility + SSE Streaming%b\n" "$BLUE" "$NC"
+    if [ ${#WHISPER_MODELS[@]} -gt 0 ]; then
+        printf "%b📦 Whisper models under test: %s%b\n" "$YELLOW" "${WHISPER_MODELS[*]}" "$NC"
+    fi
+    if [ ${#FLUID_MODELS[@]} -gt 0 ]; then
+        printf "%b💧 Fluid models under test: %s%b\n" "$YELLOW" "${FLUID_MODELS[*]}" "$NC"
     fi
     echo ""
 }
 
-echo -e "${BLUE}=== BASIC API TESTS ===${NC}"
+run_whisper_suite() {
+    local CURRENT_MODEL="$1"
+    printf "%b==============================%b\n" "$BLUE" "$NC"
+    printf "%b🧬 WHISPER MODEL UNDER TEST: %s%b\n" "$BLUE" "$CURRENT_MODEL" "$NC"
+    printf "%b==============================%b\n\n" "$BLUE" "$NC"
 
-# Test 1: JSON Response Format (Default)
-run_test "JSON Response Format" \
-    "curl -s -X POST '$SERVER_URL/v1/audio/transcriptions' -F file=@$TEST_AUDIO" \
-    '[[ "$response" == *"text"* && "$response" == *"{"* ]]'
+    run_http_test "JSON Response" 200 validate_json_text \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "model=$CURRENT_MODEL"
 
-# Test 2: Explicit JSON Response Format
-run_test "Explicit JSON Response Format" \
-    "curl -s -X POST '$SERVER_URL/v1/audio/transcriptions' -F file=@$TEST_AUDIO -F response_format=json" \
-    '[[ "$response" == *"text"* && "$response" == *"{"* ]]'
+    run_http_test "JSON Response (explicit)" 200 validate_json_text \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL"
 
-# Test 3: Text Response Format
-run_test "Text Response Format" \
-    "curl -s -X POST '$SERVER_URL/v1/audio/transcriptions' -F file=@$TEST_AUDIO -F response_format=text" \
-    '[[ "$response" != *"{"* && ${#response} -gt 0 ]]'
+    run_http_test "Plain text response" 200 validate_text_plain \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=text" \
+        -F "model=$CURRENT_MODEL"
 
-# Test 4: Language Parameter
-run_test "Language Parameter" \
-    "curl -s -X POST '$SERVER_URL/v1/audio/transcriptions' -F file=@$TEST_AUDIO -F language=en -F response_format=json" \
-    '[[ "$response" == *"text"* ]]'
+    run_http_test "Language parameter" 200 validate_json_text \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "language=en" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL"
 
-# Test 5: Prompt Parameter
-run_test "Prompt Parameter" \
-    "curl -s -X POST '$SERVER_URL/v1/audio/transcriptions' -F file=@$TEST_AUDIO -F prompt=\"This is a test\" -F response_format=json" \
-    '[[ "$response" == *"text"* ]]'
+    run_http_test "Prompt parameter" 200 validate_json_text \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "prompt=This is a test" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL"
 
-# Test 6: Error Handling - Missing File
-run_test "Missing File Parameter" \
-    "curl -s -w '%{http_code}' -X POST '$SERVER_URL/v1/audio/transcriptions'" \
-    '[[ "$response" == *"400"* || "$response" == *"error"* ]]'
+    run_http_test "Missing file error" 400 validate_json_error \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "model=$CURRENT_MODEL"
 
-# Test 7: Error Handling - Invalid Format
-run_test "Invalid Response Format" \
-    "curl -s -X POST '$SERVER_URL/v1/audio/transcriptions' -F file=@$TEST_AUDIO -F response_format=invalid" \
-    '[[ ${#response} -gt 0 ]]'  # Should return something, even if error
+    run_http_test "Invalid format error" 400 validate_json_error \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=invalid" \
+        -F "model=$CURRENT_MODEL"
 
-echo -e "${BLUE}=== SUBTITLE FORMATS TESTS ===${NC}"
+    run_http_test_with_headers "SRT format" 200 validate_srt_plain "application/x-subrip" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=srt" \
+        -F "model=$CURRENT_MODEL"
 
-# Test 8: SRT Subtitles Format
-echo -e "${BLUE}📺 Testing SRT Subtitles Format${NC}"
-srt_start=$(date +%s.%N)
-srt_response=$(curl -s -X POST "$SERVER_URL/v1/audio/transcriptions" \
-  -F file=@$TEST_AUDIO \
-  -F response_format=srt \
-  2>/dev/null)
-srt_end=$(date +%s.%N)
-srt_time=$(echo "$srt_end - $srt_start" | bc -l 2>/dev/null || echo "N/A")
+    run_http_test_with_headers "VTT format" 200 validate_vtt_plain "text/vtt" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=vtt" \
+        -F "model=$CURRENT_MODEL"
 
-if [[ "$srt_response" == *"-->"* ]] && [[ "$srt_response" == *"00:"* ]]; then
-    echo -e "${GREEN}✅ SRT format valid${NC}"
-    echo -e "${YELLOW}   Sample SRT output (first 2 lines):${NC}"
-    echo "$srt_response" | head -4 | sed 's/^/   /'
-    if [[ "$srt_time" != "N/A" ]]; then
-        printf "${YELLOW}   Response time: %.2f seconds${NC}\n" "$srt_time"
+    run_http_test "Verbose JSON format" 200 validate_verbose_json \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=verbose_json" \
+        -F "model=$CURRENT_MODEL"
+
+    run_chunked_test "Chunked SRT streaming" "application/x-subrip" validate_srt_plain \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=srt" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_chunked_test "Chunked VTT streaming" "text/vtt" validate_vtt_plain \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=vtt" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_sse_test "SSE Text" validate_sse_text \
+        -H "Accept: text/event-stream" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=text" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_sse_test "SSE JSON" validate_sse_json \
+        -H "Accept: text/event-stream" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=json" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_sse_test "SSE SRT" validate_sse_srt \
+        -H "Accept: text/event-stream" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=srt" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_sse_test "SSE VTT" validate_sse_vtt \
+        -H "Accept: text/event-stream" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=vtt" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_sse_test "SSE Verbose JSON" validate_sse_verbose \
+        -H "Accept: text/event-stream" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=verbose_json" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_chunked_test "Chunked text fallback" "text/plain; charset=utf-8" validate_chunked_text \
+        -H "Accept: application/json" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=text" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    echo -e "${BLUE}🚀 Performance Test${NC}"
+    echo -e "${YELLOW}Measuring response time...${NC}"
+    local start end duration
+    start=$(date +%s.%N)
+    if run_curl_basic -X POST "$SERVER_URL/v1/audio/transcriptions" -F "file=@$TEST_AUDIO" -F "response_format=text" -F "model=$CURRENT_MODEL"; then
+        end=$(date +%s.%N)
+        duration=$(START_TIME="$start" END_TIME="$end" python3 - <<'PY'
+import os
+start=float(os.environ["START_TIME"])
+end=float(os.environ["END_TIME"])
+print(f"{end-start:.3f}")
+PY
+)
+        printf "%b✅ Performance test completed in %s seconds%b\n" "$GREEN" "$duration" "$NC"
+        printf "%bResponse:%b %s\n" "$GREEN" "$NC" "$LAST_BODY"
+    else
+        record_fail "Performance Test" "curl failed: $CURL_ERROR"
     fi
-else
-    echo -e "${RED}❌ SRT format invalid${NC}"
-    echo -e "${YELLOW}   Response: $srt_response${NC}"
-fi
+    echo ""
 
-# Test 9: VTT Subtitles Format
-echo -e "${BLUE}📺 Testing VTT Subtitles Format${NC}"
-vtt_start=$(date +%s.%N)
-vtt_response=$(curl -s -X POST "$SERVER_URL/v1/audio/transcriptions" \
-  -F file=@$TEST_AUDIO \
-  -F response_format=vtt \
-  2>/dev/null)
-vtt_end=$(date +%s.%N)
-vtt_time=$(echo "$vtt_end - $vtt_start" | bc -l 2>/dev/null || echo "N/A")
+    run_http_test_with_headers "JSON headers" 200 validate_json_text "application/json" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL"
 
-if [[ "$vtt_response" == *"WEBVTT"* ]] && [[ "$vtt_response" == *"-->"* ]]; then
-    echo -e "${GREEN}✅ VTT format valid${NC}"
-    echo -e "${YELLOW}   Sample VTT output (first 3 lines):${NC}"
-    echo "$vtt_response" | head -5 | sed 's/^/   /'
-    if [[ "$vtt_time" != "N/A" ]]; then
-        printf "${YELLOW}   Response time: %.2f seconds${NC}\n" "$vtt_time"
+    run_http_test_with_headers "Text headers" 200 validate_text_plain "text/plain; charset=utf-8" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=text" \
+        -F "model=$CURRENT_MODEL"
+}
+
+run_fluid_suite() {
+    local CURRENT_MODEL="$1"
+    printf "%b==============================%b\n" "$BLUE" "$NC"
+    printf "%b💧 FLUID MODEL UNDER TEST: %s%b\n" "$BLUE" "$CURRENT_MODEL" "$NC"
+    printf "%b==============================%b\n\n" "$BLUE" "$NC"
+
+    run_http_test "Fluid JSON Response" 200 validate_json_text \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test "Fluid JSON (explicit)" 200 validate_json_text \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test "Fluid text response" 200 validate_text_plain \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=text" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test "Fluid language parameter" 200 validate_json_text \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "language=en" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test "Fluid prompt parameter" 200 validate_json_text \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "prompt=This is a test" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test "Fluid missing file" 400 validate_json_error \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test "Fluid invalid format" 400 validate_json_error \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=invalid" \
+        -F "model=$CURRENT_MODEL"
+
+    run_sse_test "Fluid SSE Text" validate_sse_text \
+        -H "Accept: text/event-stream" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=text" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_sse_test "Fluid SSE JSON" validate_sse_json \
+        -H "Accept: text/event-stream" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=json" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_chunked_test "Fluid chunked fallback" "text/plain; charset=utf-8" validate_chunked_text \
+        -H "Accept: application/json" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=text" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test_with_headers "Fluid JSON headers" 200 validate_json_text "application/json" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test_with_headers "Fluid text headers" 200 validate_text_plain "text/plain; charset=utf-8" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=text" \
+        -F "model=$CURRENT_MODEL"
+}
+
+run_negative_tests() {
+    printf "%b=== NEGATIVE CASES ===%b\n" "$BLUE" "$NC"
+    run_http_test "Unknown model" 400 validate_json_error \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "model=definitely-not-real"
+    echo ""
+}
+
+summarize() {
+    if [ $TEST_FAILURES -eq 0 ]; then
+        printf "%b🏁 Test Suite Complete!%b\n" "$BLUE" "$NC"
+        printf "%b🎉 WhisperServer responses validated across providers%b\n" "$GREEN" "$NC"
+        exit 0
+    else
+        printf "%b⚠️  Test suite completed with failures%b\n" "$YELLOW" "$NC"
+        exit 1
     fi
-else
-    echo -e "${RED}❌ VTT format invalid${NC}"
-    echo -e "${YELLOW}   Response: $vtt_response${NC}"
+}
+
+print_banner
+check_server_ready
+
+for model in "${WHISPER_MODELS[@]}"; do
+    run_whisper_suite "$model"
+done
+
+if [ ${#FLUID_MODELS[@]} -gt 0 ]; then
+  for model in "${FLUID_MODELS[@]}"; do
+      run_fluid_suite "$model"
+  done
 fi
 
-# Test 10: Verbose JSON Format
-echo -e "${BLUE}🔍 Testing Verbose JSON Format${NC}"
-verbose_start=$(date +%s.%N)
-verbose_response=$(curl -s -X POST "$SERVER_URL/v1/audio/transcriptions" \
-  -F file=@$TEST_AUDIO \
-  -F response_format=verbose_json \
-  2>/dev/null)
-verbose_end=$(date +%s.%N)
-verbose_time=$(echo "$verbose_end - $verbose_start" | bc -l 2>/dev/null || echo "N/A")
 
-if [[ "$verbose_response" == *"\"segments\""* ]] && [[ "$verbose_response" == *"\"start\""* ]] && [[ "$verbose_response" == *"\"end\""* ]]; then
-    echo -e "${GREEN}✅ Verbose JSON format valid${NC}"
-    echo -e "${YELLOW}   Contains required fields: text, segments, start, end${NC}"
-    if [[ "$verbose_time" != "N/A" ]]; then
-        printf "${YELLOW}   Response time: %.2f seconds${NC}\n" "$verbose_time"
-    fi
-    # Pretty-print a sample of the JSON
-    echo -e "${YELLOW}   Sample verbose JSON (formatted):${NC}"
-    echo "$verbose_response" | python3 -m json.tool 2>/dev/null | head -15 | sed 's/^/   /' || echo "   (JSON formatting failed, but response received)"
-else
-    echo -e "${RED}❌ Verbose JSON format invalid${NC}"
-    echo -e "${YELLOW}   Response: $verbose_response${NC}"
-fi
-
-echo -e "${BLUE}=== CHUNKED STREAMING TESTS ===${NC}"
-
-# Test 11: Test SRT Streaming (Chunked)
-echo -e "${BLUE}🌊 Testing SRT Streaming (Chunked)${NC}"
-stream_srt_response=$(curl -s -X POST "$SERVER_URL/v1/audio/transcriptions" \
-  -F file=@$TEST_AUDIO \
-  -F response_format=srt \
-  -F stream=true \
-  2>/dev/null)
-
-if [[ "$stream_srt_response" == *"-->"* ]] && [[ "$stream_srt_response" =~ ^[0-9]+$ ]] || [[ "$stream_srt_response" == *"00:"* ]]; then
-    echo -e "${GREEN}✅ SRT streaming works${NC}"
-    echo -e "${YELLOW}   Sample SRT streaming output (first 3 lines):${NC}"
-    echo "$stream_srt_response" | head -3 | sed 's/^/   /'
-else
-    echo -e "${RED}❌ SRT streaming failed${NC}"
-    echo -e "${YELLOW}   Response: $stream_srt_response${NC}"
-fi
-
-echo -e "${BLUE}🌊 Testing VTT Streaming (Chunked)${NC}"
-stream_vtt_response=$(curl -s -X POST "$SERVER_URL/v1/audio/transcriptions" \
-  -F file=@$TEST_AUDIO \
-  -F response_format=vtt \
-  -F stream=true \
-  2>/dev/null)
-
-if [[ "$stream_vtt_response" == *"WEBVTT"* ]] && [[ "$stream_vtt_response" == *"-->"* ]]; then
-    echo -e "${GREEN}✅ VTT streaming works${NC}"
-    echo -e "${YELLOW}   Sample VTT streaming output (first 3 lines):${NC}"
-    echo "$stream_vtt_response" | head -3 | sed 's/^/   /'
-else
-    echo -e "${RED}❌ VTT streaming failed${NC}"
-    echo -e "${YELLOW}   Response: $stream_vtt_response${NC}"
-fi
-
-echo -e "${BLUE}=== SSE STREAMING TESTS ===${NC}"
-
-# Test 12: SSE Text Streaming
-run_sse_test "SSE Text Streaming" "text" "text/event-stream" "text/event-stream" \
-    '[[ "$response" == *"data:"* && ${#response} -gt 0 ]]'
-
-# Test 13: SSE JSON Streaming
-run_sse_test "SSE JSON Streaming" "json" "text/event-stream" "text/event-stream" \
-    '[[ "$response" == *"data:"* && "$response" == *"text"* ]]'
-
-# Test 14: SSE SRT Streaming
-run_sse_test "SSE SRT Streaming" "srt" "text/event-stream" "text/event-stream" \
-    '[[ "$response" == *"data:"* && "$response" == *"-->"* ]]'
-
-# Test 15: SSE VTT Streaming
-run_sse_test "SSE VTT Streaming" "vtt" "text/event-stream" "text/event-stream" \
-    '[[ "$response" == *"data:"* && "$response" == *"WEBVTT"* ]]'
-
-# Test 16: SSE Verbose JSON Streaming
-run_sse_test "SSE Verbose JSON Streaming" "verbose_json" "text/event-stream" "text/event-stream" \
-    '[[ "$response" == *"data:"* && "$response" == *"start"* ]]'
-
-echo -e "${BLUE}=== FALLBACK TESTS ===${NC}"
-
-# Test 17: Chunked Fallback (no SSE support)
-echo -e "${PURPLE}🔄 Testing Chunked Fallback (Accept: application/json)${NC}"
-fallback_response=$(curl -s -D /tmp/fallback_headers -X POST "$SERVER_URL/v1/audio/transcriptions" \
-    -H "Accept: application/json" \
-    -F file=@$TEST_AUDIO \
-    -F response_format="text" \
-    -F stream="true" \
-    --no-buffer 2>/dev/null)
-
-fallback_headers=$(cat /tmp/fallback_headers 2>/dev/null || echo "")
-rm -f /tmp/fallback_headers
-
-if [[ "$fallback_headers" == *"text/plain"* ]] && [[ "$fallback_headers" != *"text/event-stream"* ]]; then
-    echo -e "${GREEN}✅ Chunked fallback works correctly${NC}"
-    echo -e "${YELLOW}   Content-Type: text/plain (not SSE)${NC}"
-    echo -e "${YELLOW}   Sample output: ${fallback_response:0:50}...${NC}"
-else
-    echo -e "${RED}❌ Chunked fallback failed${NC}"
-    echo -e "${RED}Headers: $fallback_headers${NC}"
-fi
-echo ""
-
-echo -e "${BLUE}=== PERFORMANCE & HEADERS TESTS ===${NC}"
-
-# Test 18: Performance Test
-echo -e "${BLUE}🚀 Performance Test${NC}"
-echo -e "${YELLOW}Measuring response time...${NC}"
-start_time=$(date +%s.%N)
-response=$(curl -s -X POST "$SERVER_URL/v1/audio/transcriptions" -F file=@$TEST_AUDIO -F response_format=text)
-end_time=$(date +%s.%N)
-duration=$(echo "$end_time - $start_time" | bc)
-
-if [ ${#response} -gt 0 ]; then
-    echo -e "${GREEN}✅ Performance test completed in ${duration} seconds${NC}"
-    echo -e "${GREEN}Response: $response${NC}"
-else
-    echo -e "${RED}❌ Performance test failed - empty response${NC}"
-fi
-echo ""
-
-# Test 19: Check Content-Type Headers
-echo -e "${BLUE}🔍 Testing HTTP Headers${NC}"
-
-# JSON Content-Type
-json_headers=$(curl -s -i -X POST "$SERVER_URL/v1/audio/transcriptions" -F file=@$TEST_AUDIO -F response_format=json 2>/dev/null | grep -i content-type || true)
-if [[ "$json_headers" == *"application/json"* ]]; then
-    echo -e "${GREEN}✅ JSON Content-Type header correct: $json_headers${NC}"
-else
-    echo -e "${RED}❌ JSON Content-Type header incorrect: $json_headers${NC}"
-fi
-
-# Text Content-Type
-text_headers=$(curl -s -i -X POST "$SERVER_URL/v1/audio/transcriptions" -F file=@$TEST_AUDIO -F response_format=text 2>/dev/null | grep -i content-type || true)
-if [[ "$text_headers" == *"text/plain"* ]]; then
-    echo -e "${GREEN}✅ Text Content-Type header correct: $text_headers${NC}"
-else
-    echo -e "${RED}❌ Text Content-Type header incorrect: $text_headers${NC}"
-fi
-
-echo ""
-echo -e "${BLUE}🏁 Test Suite Complete!${NC}"
-echo -e "${GREEN}🎉 WhisperServer supports OpenAI Whisper API + SSE Streaming!${NC}"
-echo ""
-echo -e "${YELLOW}📺 Subtitle formats available (both streaming and non-streaming):${NC}"
-echo -e "   ${GREEN}SRT:${NC}   curl -F file=@audio.wav -F response_format=srt $SERVER_URL/v1/audio/transcriptions"
-echo -e "   ${GREEN}VTT:${NC}   curl -F file=@audio.wav -F response_format=vtt $SERVER_URL/v1/audio/transcriptions"
-echo -e "   ${GREEN}Verbose JSON:${NC} curl -F file=@audio.wav -F response_format=verbose_json $SERVER_URL/v1/audio/transcriptions"
-echo ""
-echo -e "${YELLOW}🌊 SSE STREAMING support for ALL formats:${NC}"
-echo -e "   ${GREEN}SSE Text:${NC} curl -H 'Accept: text/event-stream' -F file=@audio.wav -F response_format=text -F stream=true $SERVER_URL/v1/audio/transcriptions"
-echo -e "   ${GREEN}SSE JSON:${NC} curl -H 'Accept: text/event-stream' -F file=@audio.wav -F response_format=json -F stream=true $SERVER_URL/v1/audio/transcriptions"
-echo -e "   ${GREEN}SSE SRT:${NC}  curl -H 'Accept: text/event-stream' -F file=@audio.wav -F response_format=srt -F stream=true $SERVER_URL/v1/audio/transcriptions"
-echo ""
-echo -e "${YELLOW}🔄 CHUNKED FALLBACK (automatic when SSE not supported):${NC}"
-echo -e "   ${GREEN}Chunked:${NC} curl -H 'Accept: application/json' -F file=@audio.wav -F response_format=text -F stream=true $SERVER_URL/v1/audio/transcriptions"
-echo ""
-echo -e "${YELLOW}💡 This comprehensive test suite covers:${NC}"
-echo "   - OpenAI Whisper API compatibility"
-echo "   - All response formats (json, text, srt, vtt, verbose_json)"
-echo "   - SSE streaming with proper headers"
-echo "   - Chunked response fallback"
-echo "   - Error handling and performance testing"
-echo ""
-echo -e "${YELLOW}📝 OpenAI Whisper API Reference:${NC}"
-echo "   https://platform.openai.com/docs/api-reference/audio/createTranscription" 
+run_negative_tests
+summarize

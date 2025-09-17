@@ -210,73 +210,99 @@ final class WhisperAudioConverter {
     ///   - minSpeechDuration: Minimum duration to consider as speech (seconds)
     ///   - minSilenceDuration: Minimum duration to consider as silence (seconds)
     /// - Returns: Array of detected speech segments
-    private static func detectSpeechSegments(samples: [Float], 
+    private static func detectSpeechSegments(samples: [Float],
                                            sampleRate: Double = targetSampleRate,
                                            energyThreshold: Float = 0.02,
                                            minSpeechDuration: Double = 0.3,
                                            minSilenceDuration: Double = 0.5) -> [SpeechSegment] {
-        // Running simple energy-based VAD
-        
-        // Window size for energy calculation (20ms)
-        let windowSize = Int(sampleRate * 0.02)
-        let hopSize = windowSize / 2
-        
+        // Optimized energy-based VAD: sliding RMS without per-window allocations
+        let windowSize = max(1, Int(sampleRate * 0.02)) // ~20ms
+        let hopSize = max(1, windowSize / 2)
+
+        guard samples.count >= windowSize else {
+            return []
+        }
+
         var speechSegments: [SpeechSegment] = []
         var isSpeech = false
         var speechStartSample = 0
         var lastSpeechEndSample = 0
-        
-        // Calculate RMS energy for each window
-        var windowIndex = 0
-        while windowIndex + windowSize <= samples.count {
-            let windowSamples = Array(samples[windowIndex..<(windowIndex + windowSize)])
-            let energy = sqrt(windowSamples.map { $0 * $0 }.reduce(0, +) / Float(windowSize))
-            
+
+        // Initialize sum of squares for the first window
+        var sumSquares: Float = 0
+        for i in 0..<windowSize {
+            let s = samples[i]
+            sumSquares += s * s
+        }
+
+        var windowStart = 0
+        var windowEnd = windowSize
+
+        func rmsEnergy() -> Float {
+            return sqrt(sumSquares / Float(windowSize))
+        }
+
+        while windowEnd <= samples.count {
+            let energy = rmsEnergy()
+
             if energy > energyThreshold {
-                // Detected speech
                 if !isSpeech {
-                    speechStartSample = windowIndex
+                    speechStartSample = windowStart
                     isSpeech = true
                 }
-                lastSpeechEndSample = windowIndex + windowSize
+                lastSpeechEndSample = windowEnd
             } else {
-                // Detected silence
                 if isSpeech {
-                    let silenceDuration = Double(windowIndex - lastSpeechEndSample) / sampleRate
+                    let silenceDuration = Double(windowStart - lastSpeechEndSample) / sampleRate
                     if silenceDuration > minSilenceDuration {
-                        // End of speech segment
                         let speechDuration = Double(lastSpeechEndSample - speechStartSample) / sampleRate
                         if speechDuration > minSpeechDuration {
-                            let segment = SpeechSegment(
+                            speechSegments.append(SpeechSegment(
                                 startTime: Double(speechStartSample) / sampleRate,
                                 endTime: Double(lastSpeechEndSample) / sampleRate,
                                 startSample: speechStartSample,
                                 endSample: lastSpeechEndSample
-                            )
-                            speechSegments.append(segment)
+                            ))
                         }
                         isSpeech = false
                     }
                 }
             }
-            
-            windowIndex += hopSize
+
+            // Advance by hop; update sumSquares incrementally
+            if windowEnd + hopSize > samples.count {
+                break
+            }
+
+            // Remove leaving samples
+            let leaveCount = hopSize
+            for i in windowStart..<(windowStart + leaveCount) {
+                let s = samples[i]
+                sumSquares -= s * s
+            }
+            // Add incoming samples
+            for i in windowEnd..<(windowEnd + hopSize) {
+                let s = samples[i]
+                sumSquares += s * s
+            }
+
+            windowStart += hopSize
+            windowEnd += hopSize
         }
-        
-        // Handle last segment if still in speech
+
+        // Close any pending speech segment
         if isSpeech {
             let speechDuration = Double(lastSpeechEndSample - speechStartSample) / sampleRate
             if speechDuration > minSpeechDuration {
-                let segment = SpeechSegment(
+                speechSegments.append(SpeechSegment(
                     startTime: Double(speechStartSample) / sampleRate,
                     endTime: Double(lastSpeechEndSample) / sampleRate,
                     startSample: speechStartSample,
                     endSample: lastSpeechEndSample
-                )
-                speechSegments.append(segment)
+                ))
             }
         }
-        
+
         return speechSegments
     }
     

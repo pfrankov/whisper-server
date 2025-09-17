@@ -289,6 +289,30 @@ struct WhisperTranscriptionService {
     }
     
     // MARK: - Private Methods
+
+    /// Creates and configures whisper parameters and returns them along with allocated C strings.
+    /// Callers must free returned C-string pointers after whisper_full returns.
+    private static func makeWhisperParams(printTimestamps: Bool,
+                                          language: String?,
+                                          prompt: String?) -> (whisper_full_params, UnsafeMutablePointer<CChar>?, UnsafeMutablePointer<CChar>?) {
+        var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
+        params.print_realtime = false
+        params.print_progress = false
+        params.print_timestamps = printTimestamps
+        params.print_special = false
+        params.translate = false
+        params.single_segment = false
+        params.max_tokens = 0
+        params.audio_ctx = 0
+
+        var langPtr: UnsafeMutablePointer<CChar>? = nil
+        var promptPtr: UnsafeMutablePointer<CChar>? = nil
+        if let lang = language { langPtr = strdup(lang) }
+        if let promptText = prompt { promptPtr = strdup(promptText) }
+        params.language = UnsafePointer(langPtr)
+        params.initial_prompt = UnsafePointer(promptPtr)
+        return (params, langPtr, promptPtr)
+    }
     
     /// Processes audio chunks and returns the combined transcription
     private static func processChunks(_ chunks: [(samples: [Float], startTime: Double, endTime: Double)], 
@@ -375,23 +399,7 @@ struct WhisperTranscriptionService {
         }
         
         // Configure parameters
-        var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
-        params.print_realtime = false
-        params.print_progress = false
-        params.print_timestamps = false
-        params.print_special = false
-        params.translate = false
-        params.single_segment = false
-        params.max_tokens = 0
-        params.audio_ctx = 0
-        
-        // Prepare stable C-strings for language and prompt (freed after call)
-        var langPtr: UnsafeMutablePointer<CChar>? = nil
-        var promptPtr: UnsafeMutablePointer<CChar>? = nil
-        if let lang = language { langPtr = strdup(lang) }
-        if let promptText = prompt { promptPtr = strdup(promptText) }
-        params.language = UnsafePointer(langPtr)
-        params.initial_prompt = UnsafePointer(promptPtr)
+        var (params, langPtr, promptPtr) = makeWhisperParams(printTimestamps: false, language: language, prompt: prompt)
 
         // Process the audio
         let result = samples.withUnsafeBufferPointer { buffer in
@@ -447,23 +455,7 @@ struct WhisperTranscriptionService {
         }
         
         // Configure parameters
-        var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
-        params.print_realtime = false
-        params.print_progress = false
-        params.print_timestamps = true
-        params.print_special = false
-        params.translate = false
-        params.single_segment = false
-        params.max_tokens = 0
-        params.audio_ctx = 0
-        
-        // Prepare stable C-strings for language and prompt (freed after call)
-        var langPtr: UnsafeMutablePointer<CChar>? = nil
-        var promptPtr: UnsafeMutablePointer<CChar>? = nil
-        if let lang = language { langPtr = strdup(lang) }
-        if let promptText = prompt { promptPtr = strdup(promptText) }
-        params.language = UnsafePointer(langPtr)
-        params.initial_prompt = UnsafePointer(promptPtr)
+        var (params, langPtr, promptPtr) = makeWhisperParams(printTimestamps: true, language: language, prompt: prompt)
 
         // Process the audio
         let result = samples.withUnsafeBufferPointer { buffer in
