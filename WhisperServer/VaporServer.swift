@@ -14,6 +14,9 @@ final class VaporServer {
     
     /// Model manager instance
     private let modelManager: ModelManager
+
+    /// Tracks the Whisper model currently loaded in the transcription context
+    private var activeWhisperModelID: String?
     
     /// Flag indicating whether the server is running
     private(set) var isRunning = false
@@ -122,10 +125,19 @@ final class VaporServer {
         return headers
     }
 
-    /// Resolve provider from request or UI selection
-    private func resolveProvider(_ raw: String?) -> Provider {
-        if let raw, let val = Provider(rawValue: raw.lowercased()) { return val }
-        return (self.modelManager.selectedProvider == .fluid) ? .fluid : .whisper
+    /// Ensures the requested Whisper model is available and resets the context if needed
+    private func prepareWhisperModelForRequest(_ requestedModelID: String?) async throws -> (binPath: URL, encoderDir: URL) {
+        let paths = try await modelManager.prepareModelForUse(modelID: requestedModelID)
+        if let selectedID = modelManager.selectedModelID {
+            if activeWhisperModelID != selectedID {
+                WhisperTranscriptionService.reinitializeContext()
+            }
+            activeWhisperModelID = selectedID
+        } else {
+            WhisperTranscriptionService.reinitializeContext()
+            activeWhisperModelID = nil
+        }
+        return paths
     }
 
     // MARK: - Routes
@@ -143,8 +155,7 @@ final class VaporServer {
                 var prompt: String?
                 var response_format: String?
                 var stream: Bool?
-                var provider: String? // "whisper" (default) or "fluid"
-                var model: String?    // optional model hint; for Fluid treated as locale if provided
+                var model: String?    // optional model identifier; resolves across Whisper and FluidAudio catalogs
             }
             
             let whisperReq = try req.content.decode(WhisperRequest.self)
@@ -158,20 +169,52 @@ final class VaporServer {
             try await req.fileio.writeFile(whisperReq.file.data, at: tempFileURL.path)
             
             let responseFormat = self.parseResponseFormat(whisperReq.response_format)
-            let provider: Provider = self.resolveProvider(whisperReq.provider)
+            let requestedModelID = whisperReq.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedModelID = (requestedModelID?.isEmpty ?? true) ? nil : requestedModelID
 
-            // Resolve whisper model paths only when needed
-            let modelPaths: (binPath: URL, encoderDir: URL)? = {
-                if provider == .whisper {
-                    return self.modelManager.getPathsForSelectedModel()
-                } else {
-                    return nil
-                }
-            }()
-            if provider == .whisper && modelPaths == nil {
-                throw Abort(.internalServerError, reason: "Model not configured")
+            var provider: Provider
+            var whisperModelID: String? = nil
+            var fluidModelDescriptor: FluidTranscriptionService.ModelDescriptor?
+
+            if let normalizedModelID,
+               let descriptor = FluidTranscriptionService.modelDescriptor(for: normalizedModelID) {
+                provider = .fluid
+                fluidModelDescriptor = descriptor
+            } else if normalizedModelID == nil,
+                      modelManager.selectedProvider == .fluid {
+                provider = .fluid
+            } else {
+                provider = .whisper
+                whisperModelID = normalizedModelID
             }
-            
+
+            var modelPaths: (binPath: URL, encoderDir: URL)? = nil
+            if provider == .whisper {
+                do {
+                    modelPaths = try await self.prepareWhisperModelForRequest(whisperModelID)
+                } catch let error as ModelManager.ModelPreparationError {
+                    switch error {
+                    case .modelNotFound, .noModelSelected:
+                        throw Abort(.badRequest, reason: error.localizedDescription)
+                    default:
+                        throw Abort(.internalServerError, reason: error.localizedDescription)
+                    }
+                } catch {
+                    throw Abort(.internalServerError, reason: "Failed to prepare model: \(error.localizedDescription)")
+                }
+
+                if modelPaths == nil {
+                    throw Abort(.internalServerError, reason: "Model not configured")
+                }
+            }
+
+            var fluidLanguage = whisperReq.language
+            if provider == .fluid {
+                if fluidModelDescriptor == nil {
+                    fluidModelDescriptor = FluidTranscriptionService.defaultModel
+                }
+            }
+
             if whisperReq.stream == true {
                 // Check if client supports SSE
                 let useSSE = self.supportsSSE(req)
@@ -330,6 +373,8 @@ final class VaporServer {
                         case .fluid:
                             // Do the work asynchronously, then emit a single chunk
                             Task {
+                                let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                                let selectedLanguage = fluidLanguage
                                 defer {
                                     req.eventLoop.execute {
                                         if useSSE {
@@ -343,7 +388,11 @@ final class VaporServer {
                                     }
                                 }
 
-                                if let transcription = await FluidTranscriptionService.transcribeText(at: tempFileURL, language: whisperReq.model ?? whisperReq.language) {
+                                if let transcription = await FluidTranscriptionService.transcribeText(
+                                    at: tempFileURL,
+                                    language: selectedLanguage,
+                                    model: descriptor
+                                ) {
                                     let trimmed = transcription.trimmingCharacters(in: .whitespacesAndNewlines)
                                     let output: String
                                     switch responseFormat {
@@ -454,7 +503,12 @@ final class VaporServer {
                             contentType = self.contentType(for: .json)
                         }
                     case .fluid:
-                        if let transcription = await FluidTranscriptionService.transcribeText(at: tempFileURL, language: whisperReq.model ?? whisperReq.language) {
+                        let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                        if let transcription = await FluidTranscriptionService.transcribeText(
+                            at: tempFileURL,
+                            language: fluidLanguage,
+                            model: descriptor
+                        ) {
                             switch responseFormat {
                             case .json:
                                 let jsonResponse = ["text": transcription]

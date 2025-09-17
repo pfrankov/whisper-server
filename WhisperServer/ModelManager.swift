@@ -24,6 +24,26 @@ final class ModelManager: @unchecked Sendable {
 
     enum Provider: String { case whisper, fluid }
 
+    enum ModelPreparationError: LocalizedError {
+        case modelsDirectoryUnavailable
+        case noModelSelected
+        case modelNotFound(String)
+        case modelVerificationFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .modelsDirectoryUnavailable:
+                return "Models directory is unavailable"
+            case .noModelSelected:
+                return "No model selected"
+            case .modelNotFound(let identifier):
+                return "Model with identifier '\(identifier)' is not available"
+            case .modelVerificationFailed:
+                return "Model verification failed after download"
+            }
+        }
+    }
+
     @Published private(set) var availableModels: [Model] = []
     @Published private(set) var selectedModelID: String? {
         didSet {
@@ -144,9 +164,7 @@ final class ModelManager: @unchecked Sendable {
     // MARK: - Model Preparation (Checking & Downloading) - To be implemented
 
     func checkAndPrepareSelectedModel() {
-        // If FluidAudio provider is selected, trigger FluidAudio model download/prepare
         if selectedProvider == .fluid {
-            // Prevent duplicate calls (FluidAudio only)
             if isPreparingFluidModels { return }
             isPreparingFluidModels = true
             isModelReady = false
@@ -156,7 +174,6 @@ final class ModelManager: @unchecked Sendable {
             Task { [weak self] in
                 guard let self = self else { return }
                 do {
-                    // Download and compile models (cached between runs)
                     _ = try await AsrModels.downloadAndLoad()
                     DispatchQueue.main.async {
                         self.currentStatus = "FluidAudio models ready"
@@ -176,48 +193,137 @@ final class ModelManager: @unchecked Sendable {
             return
         }
 
-        guard let selectedID = selectedModelID,
-              let model = availableModels.first(where: { $0.id == selectedID }),
-              let modelsDir = modelsDirectory else {
-            currentStatus = selectedModelID == nil ? "No model selected" : "Error: Cannot prepare model"
+        guard let targetID = selectedModelID else {
+            currentStatus = "No model selected"
             isModelReady = false
             NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
             return
         }
 
-        // Prevent duplicate calls (Whisper only)
-        if isPreparingWhisperModel { return }
-
-        isPreparingWhisperModel = true
-        currentStatus = "Checking model: \(model.name)"
-        isModelReady = false
-
-        Task { // Use Task for async operations
+        Task { [weak self] in
+            guard let self = self else { return }
             do {
-                let filesExist = try await checkModelFilesExist(model: model, directory: modelsDir)
-
-                if filesExist {
-                    currentStatus = "Model '\(model.name)' is ready."
-                    isModelReady = true
-                    isPreparingWhisperModel = false // Reset flag
-                    NotificationCenter.default.post(name: .modelIsReady, object: self)
-                } else {
-                    currentStatus = "Downloading model: \(model.name)..."
-                    // Clear any previous progress
-                    self.downloadProgress = 0.0
-                    try await downloadAndPrepareModel(model: model, directory: modelsDir)
-                    // After successful download, model is ready
-                    isModelReady = true
-                    isPreparingWhisperModel = false // Reset flag
-                    NotificationCenter.default.post(name: .modelIsReady, object: self)
-                }
+                _ = try await self.prepareModelForUse(modelID: targetID)
             } catch {
-                currentStatus = "Error checking model files: \(error.localizedDescription)"
-                isModelReady = false
-                isPreparingWhisperModel = false // Reset flag on error
-                NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+                await MainActor.run {
+                    self.currentStatus = "Error preparing model: \(error.localizedDescription)"
+                    self.isModelReady = false
+                    self.downloadProgress = nil
+                }
             }
         }
+    }
+
+    func prepareModelForUse(modelID requestedModelID: String?) async throws -> (binPath: URL, encoderDir: URL) {
+        guard let modelsDir = modelsDirectory else {
+            await MainActor.run {
+                self.currentStatus = "Error: Cannot prepare model"
+                self.isModelReady = false
+                self.downloadProgress = nil
+                NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+            }
+            throw ModelPreparationError.modelsDirectoryUnavailable
+        }
+
+        let trimmedID = requestedModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identifier: String
+        if let trimmedID, !trimmedID.isEmpty {
+            identifier = trimmedID
+        } else if let selectedID = selectedModelID {
+            identifier = selectedID
+        } else {
+            await MainActor.run {
+                self.currentStatus = "No model selected"
+                self.isModelReady = false
+                self.downloadProgress = nil
+                NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+            }
+            throw ModelPreparationError.noModelSelected
+        }
+
+        guard let model = availableModels.first(where: { $0.id == identifier || $0.name.caseInsensitiveCompare(identifier) == .orderedSame }) else {
+            await MainActor.run {
+                self.currentStatus = "Model '\(identifier)' is not available"
+                self.isModelReady = false
+                self.downloadProgress = nil
+                NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+            }
+            throw ModelPreparationError.modelNotFound(identifier)
+        }
+
+        await MainActor.run {
+            self.suppressAutoPrepare = true
+            if self.selectedProvider != .whisper {
+                self.selectedProvider = .whisper
+            }
+            if self.selectedModelID != model.id {
+                self.selectedModelID = model.id
+            }
+            self.suppressAutoPrepare = false
+        }
+
+        await MainActor.run {
+            self.isPreparingWhisperModel = true
+        }
+        let resetPreparing: () -> Void = {
+            Task { @MainActor in
+                self.isPreparingWhisperModel = false
+            }
+        }
+        defer { resetPreparing() }
+
+        let filesExist: Bool
+        do {
+            filesExist = try await checkModelFilesExist(model: model, directory: modelsDir)
+        } catch {
+            await MainActor.run {
+                self.currentStatus = "Error checking model files: \(error.localizedDescription)"
+                self.downloadProgress = nil
+                self.isModelReady = false
+                NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+            }
+            throw error
+        }
+
+        if filesExist, let paths = getPaths(for: model, directory: modelsDir) {
+            await MainActor.run {
+                self.currentStatus = "Model '\(model.name)' is ready."
+                self.downloadProgress = nil
+                self.isModelReady = true
+                NotificationCenter.default.post(name: .modelIsReady, object: self)
+            }
+            return paths
+        }
+
+        await MainActor.run {
+            self.currentStatus = "Downloading model: \(model.name)..."
+            self.downloadProgress = 0.0
+            self.isModelReady = false
+        }
+
+        do {
+            try await downloadAndPrepareModel(model: model, directory: modelsDir)
+        } catch {
+            await MainActor.run {
+                self.currentStatus = "Error downloading model: \(error.localizedDescription)"
+                self.downloadProgress = nil
+                self.isModelReady = false
+                NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+            }
+            throw error
+        }
+
+        guard let preparedPaths = getPaths(for: model, directory: modelsDir) else {
+            await MainActor.run {
+                self.currentStatus = "Error: Model verification failed"
+                self.downloadProgress = nil
+                self.isModelReady = false
+                NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+            }
+            throw ModelPreparationError.modelVerificationFailed
+        }
+
+        return preparedPaths
     }
 
     private func checkModelFilesExist(model: Model, directory: URL) async throws -> Bool {
@@ -669,46 +775,30 @@ final class ModelManager: @unchecked Sendable {
     }
 
     // MARK: - Get Model Paths
-    
-    func getPathsForSelectedModel() -> (binPath: URL, encoderDir: URL)? {
-        guard let selectedID = selectedModelID else {
-            return nil
-        }
-        
-        guard let model = availableModels.first(where: { $0.id == selectedID }) else {
-            return nil
-        }
-        
-        guard let modelsDir = modelsDirectory else {
-            return nil
-        }
 
+    private func getPaths(for model: Model, directory: URL) -> (binPath: URL, encoderDir: URL)? {
         var binPath: URL?
         var encoderDir: URL?
 
         for fileInfo in model.files {
-            let localURL = modelsDir.appendingPathComponent(fileInfo.filename)
-            
+            let localURL = directory.appendingPathComponent(fileInfo.filename)
+
             if fileInfo.type == "bin" {
-                // First try a more direct approach to check if the file exists
                 let fileExists = fileManager.fileExists(atPath: localURL.path)
-                
-                // Get more detailed information
+
                 do {
                     let resourceValues = try localURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey])
                     _ = resourceValues
                 } catch {
                     // Ignore detailed resource errors here
                 }
-                
+
                 if fileExists {
-                    // Additional verification that it's a valid model file
                     do {
                         let fileHandle = try FileHandle(forReadingFrom: localURL)
-                        // Just check if we can read the first few bytes
                         let header = try fileHandle.read(upToCount: 16)
                         try fileHandle.close()
-                        
+
                         if header != nil && !header!.isEmpty {
                             binPath = localURL
                         }
@@ -716,31 +806,27 @@ final class ModelManager: @unchecked Sendable {
                         return nil
                     }
                 } else {
-                    // Try to find a matching file with a different extension - perhaps it downloaded incorrectly
                     let baseName = (localURL.lastPathComponent as NSString).deletingPathExtension
                     do {
-                        let directoryContents = try fileManager.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: nil)
-                        for item in directoryContents {
-                            if item.lastPathComponent.contains(baseName) {
-                                binPath = item
-                                break
-                            }
+                        let directoryContents = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                        for item in directoryContents where item.lastPathComponent.contains(baseName) {
+                            binPath = item
+                            break
                         }
                     } catch {
                         // Ignore directory listing errors here
                     }
-                    
+
                     if binPath == nil {
                         return nil
                     }
                 }
             } else if fileInfo.type == "zip" {
                 let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
-                let unzippedURL = modelsDir.appendingPathComponent(unzippedName)
+                let unzippedURL = directory.appendingPathComponent(unzippedName)
                 var isDirectory: ObjCBool = false
-                
+
                 if fileManager.fileExists(atPath: unzippedURL.path, isDirectory: &isDirectory) && isDirectory.boolValue {
-                    // Additional verification - check if it has content
                     do {
                         let contents = try fileManager.contentsOfDirectory(atPath: unzippedURL.path)
                         if !contents.isEmpty {
@@ -750,12 +836,11 @@ final class ModelManager: @unchecked Sendable {
                         // Ignore listing errors; we'll fall back below
                     }
                 } else {
-                    // Check if the directory might be at a different location
                     do {
-                        let directoryContents = try fileManager.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: [.isDirectoryKey])
+                        let directoryContents = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey])
                         for item in directoryContents {
                             var isDir: ObjCBool = false
-                            if fileManager.fileExists(atPath: item.path, isDirectory: &isDir) && isDir.boolValue {
+                            if fileManager.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
                                 if item.lastPathComponent.contains("encoder") || item.lastPathComponent.contains("mlmodelc") {
                                     encoderDir = item
                                     break
@@ -765,7 +850,7 @@ final class ModelManager: @unchecked Sendable {
                     } catch {
                         // Ignore listing errors here
                     }
-                    
+
                     if encoderDir == nil {
                         return nil
                     }
@@ -773,18 +858,19 @@ final class ModelManager: @unchecked Sendable {
             }
         }
 
-        // Ensure both paths were found
-        if binPath == nil {
+        guard let bin = binPath, let encoder = encoderDir else {
             return nil
         }
-        
-        if encoderDir == nil {
+        return (bin, encoder)
+    }
+
+    func getPathsForSelectedModel() -> (binPath: URL, encoderDir: URL)? {
+        guard let selectedID = selectedModelID,
+              let model = availableModels.first(where: { $0.id == selectedID }),
+              let modelsDir = modelsDirectory else {
             return nil
         }
-        
-        guard let binPathValue = binPath, let encoderDirValue = encoderDir else {
-            return nil
-        }
-        return (binPathValue, encoderDirValue)
+
+        return getPaths(for: model, directory: modelsDir)
     }
 }
