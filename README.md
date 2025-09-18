@@ -162,3 +162,40 @@ If you have problems connecting to the server:
 4. If the server is not responding, restart the application
 
 For detailed logs, run the application from Xcode and watch the console. 
+
+## Versioning and release
+
+This repository contains a small helper script to bump the app version using Xcode's MARKETING_VERSION and keep Info.plist in sync.
+
+Script: `scripts/bump_version.sh`
+
+Usage:
+
+1) Bump the patch version (increments patch by 1):
+
+```bash
+./scripts/bump_version.sh patch
+```
+
+2) Bump the minor version (increments minor by 1, resets patch to 0):
+
+```bash
+./scripts/bump_version.sh minor
+```
+
+3) Bump the major version (increments major by 1, resets minor and patch to 0):
+
+```bash
+./scripts/bump_version.sh major
+```
+
+Optional flags:
+- `--build <number>` — set an explicit `CFBundleVersion` (build number).
+- `--tag` — create an annotated git tag named `v<new-version>`.
+- `--push` — push commit (and tag, if `--tag` used) to `origin`.
+
+Notes:
+- The script updates MARKETING_VERSION in `WhisperServer.xcodeproj/project.pbxproj` and ensures `WhisperServer/Info.plist` uses `$(MARKETING_VERSION)` for `CFBundleShortVersionString`. It also updates `CFBundleVersion` (build number).
+- After running the script, review changes and commit them (for example `git add WhisperServer.xcodeproj/project.pbxproj WhisperServer/Info.plist && git commit -m "Bump version to X.Y.Z"`).
+- `--tag` will create an annotated tag named `v<version>` on the current HEAD — make sure you've committed first.
+- `--push` will push the tag (if used with `--tag`) or push the current branch if used alone.
