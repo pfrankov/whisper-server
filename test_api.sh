@@ -362,6 +362,78 @@ validate_sse_srt() { validate_sse_stream "srt"; }
 validate_sse_vtt() { validate_sse_stream "vtt"; }
 validate_sse_verbose() { validate_sse_stream "verbose_json"; }
 
+validate_model_list() {
+    local whisper_expected=""
+    local fluid_expected=""
+    if declare -p WHISPER_MODELS >/dev/null 2>&1 && [ ${#WHISPER_MODELS[@]} -gt 0 ]; then
+        whisper_expected=$(printf '%s\n' "${WHISPER_MODELS[@]}")
+    fi
+    if declare -p FLUID_MODELS >/dev/null 2>&1 && [ ${#FLUID_MODELS[@]} -gt 0 ]; then
+        fluid_expected=$(printf '%s\n' "${FLUID_MODELS[@]}")
+    fi
+    BODY="$LAST_BODY" WHISPER_EXPECTED="$whisper_expected" FLUID_EXPECTED="$fluid_expected" python3 - <<'PY'
+import json, os, sys
+
+body = os.environ.get("BODY", "")
+if not body:
+    print("Empty body", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    payload = json.loads(body)
+except Exception as exc:  # noqa: BLE001
+    print(f"JSON decode failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if payload.get("object") != "list":
+    print("Root object must be 'list'", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data")
+if not isinstance(data, list) or not data:
+    print("'data' must be a non-empty array", file=sys.stderr)
+    sys.exit(1)
+
+whisper_expected = [line.strip() for line in os.environ.get("WHISPER_EXPECTED", "").splitlines() if line.strip()]
+fluid_expected = [line.strip() for line in os.environ.get("FLUID_EXPECTED", "").splitlines() if line.strip()]
+
+providers = {entry.get("provider") for entry in data if isinstance(entry, dict)}
+if "whisper" not in providers:
+    print("Whisper provider missing from model list", file=sys.stderr)
+    sys.exit(1)
+
+if fluid_expected and "fluid" not in providers:
+    print("Fluid provider missing from model list", file=sys.stderr)
+    sys.exit(1)
+
+def ensure_models(expected, provider):
+    for model_id in expected:
+        if not any(isinstance(entry, dict) and entry.get("id") == model_id and entry.get("provider") == provider for entry in data):
+            print(f"Model '{model_id}' for provider '{provider}' not present", file=sys.stderr)
+            sys.exit(1)
+
+ensure_models(whisper_expected, "whisper")
+ensure_models(fluid_expected, "fluid")
+
+for entry in data:
+    if not isinstance(entry, dict):
+        print("Model entry is not an object", file=sys.stderr)
+        sys.exit(1)
+    for key in ("id", "object", "provider", "type"):
+        if key not in entry:
+            print(f"Model entry missing '{key}'", file=sys.stderr)
+            sys.exit(1)
+    if entry.get("object") != "model":
+        print("Model entry must have object == 'model'", file=sys.stderr)
+        sys.exit(1)
+    if entry.get("type") != "audio.transcription":
+        print("Model entry must have type 'audio.transcription'", file=sys.stderr)
+        sys.exit(1)
+
+sys.exit(0)
+PY
+}
+
 ensure_content_type() {
     local expected="$1"
     local headers="$LAST_HEADERS"
@@ -514,6 +586,33 @@ run_sse_test() {
         record_fail "$name" "SSE payload validation failed"
         echo "   Response (first lines):"
         printf '   %s\n' "$(printf '%s' "$LAST_BODY" | head -n 6)"
+        echo ""
+        return
+    fi
+    record_pass "$name"
+    echo ""
+}
+
+run_models_listing_test() {
+    local name="Model catalog"
+    echo -e "${BLUE}🧾 Testing: $name${NC}"
+    local command
+    command=$(render_command -X GET "$SERVER_URL/v1/models")
+    echo -e "${YELLOW}Command: $command${NC}"
+    if ! run_curl_basic -X GET "$SERVER_URL/v1/models"; then
+        record_fail "$name" "curl failed: $CURL_ERROR"
+        echo ""
+        return
+    fi
+    if [ "$LAST_STATUS" != "200" ]; then
+        record_fail "$name" "Expected HTTP 200, got $LAST_STATUS"
+        echo "   Response: $LAST_BODY"
+        echo ""
+        return
+    fi
+    if ! validate_model_list; then
+        record_fail "$name" "Model listing validation failed"
+        echo "   Response: $LAST_BODY"
         echo ""
         return
     fi
@@ -815,6 +914,7 @@ summarize() {
 
 print_banner
 check_server_ready
+run_models_listing_test
 
 for model in "${WHISPER_MODELS[@]}"; do
     run_whisper_suite "$model"

@@ -73,6 +73,39 @@ final class VaporServer {
     /// Supported providers
     private enum Provider: String { case whisper, fluid }
 
+    /// REST response model for GET /v1/models
+    private struct APIModelListResponse: Content {
+        let object: String
+        let data: [APIModelResource]
+    }
+
+    /// Individual model descriptor for API responses
+    private struct APIModelResource: Content {
+        let id: String
+        let object: String
+        let ownedBy: String
+        let created: Int
+        let provider: String
+        let name: String
+        let type: String
+        let aliases: [String]?
+        let supportsStreaming: Bool
+        let isDefault: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case object
+            case ownedBy = "owned_by"
+            case created
+            case provider
+            case name
+            case type
+            case aliases
+            case supportsStreaming = "supports_streaming"
+            case isDefault = "default"
+        }
+    }
+
     /// Parses response format string, returning json as default when nil
     /// - Throws: Abort(.badRequest) for unsupported formats provided by the client
     private func parseResponseFormat(_ raw: String?) throws -> WhisperSubtitleFormatter.ResponseFormat {
@@ -175,6 +208,50 @@ final class VaporServer {
         // Set a high limit for streaming body collection to handle large audio files.
         // Vapor streams requests larger than 16KB to a temporary file on disk by default.
         app.routes.defaultMaxBodySize = "1gb"
+
+        app.get("v1", "models") { [self] _ -> APIModelListResponse in
+            let currentProvider = self.modelManager.selectedProvider
+            let selectedWhisperID = self.modelManager.selectedModelID
+            let resolvedWhisperSelection = selectedWhisperID ?? self.modelManager.availableModels.first?.id
+
+            let whisperModels = self.modelManager.availableModels.map { model -> APIModelResource in
+                let isDefault = (currentProvider == .whisper && resolvedWhisperSelection == model.id)
+                return APIModelResource(
+                    id: model.id,
+                    object: "model",
+                    ownedBy: "whisperserver",
+                    created: 0,
+                    provider: Provider.whisper.rawValue,
+                    name: model.name,
+                    type: "audio.transcription",
+                    aliases: nil,
+                    supportsStreaming: true,
+                    isDefault: isDefault
+                )
+            }
+
+            let fluidDefaultModelID = FluidTranscriptionService.defaultModel.id
+            let fluidModels = FluidTranscriptionService.availableModels.map { descriptor -> APIModelResource in
+                let aliasCandidates = descriptor.allIdentifiers.filter { $0.caseInsensitiveCompare(descriptor.id) != .orderedSame }
+                let aliases = aliasCandidates.isEmpty ? nil : aliasCandidates
+                let isDefault = (currentProvider == .fluid && descriptor.id == fluidDefaultModelID)
+                return APIModelResource(
+                    id: descriptor.id,
+                    object: "model",
+                    ownedBy: "fluidaudio",
+                    created: 0,
+                    provider: Provider.fluid.rawValue,
+                    name: descriptor.displayName,
+                    type: "audio.transcription",
+                    aliases: aliases,
+                    supportsStreaming: true,
+                    isDefault: isDefault
+                )
+            }
+
+            let models = whisperModels + fluidModels
+            return APIModelListResponse(object: "list", data: models)
+        }
 
         app.post("v1", "audio", "transcriptions") { [self] req async throws -> Response in
             
