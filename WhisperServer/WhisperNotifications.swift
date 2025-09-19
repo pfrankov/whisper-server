@@ -9,5 +9,11 @@ extension Notification.Name {
     static let modelPreparationFailed = Notification.Name("ModelPreparationFailed")
     static let tinyModelAutoSelected = Notification.Name("TinyModelAutoSelected")
     static let whisperMetalActivated = Notification.Name("WhisperMetalActivated")
+    static let transcriptionProgressUpdated = Notification.Name("TranscriptionProgressUpdated")
 }
 
+enum TranscriptionProgressUserInfoKey {
+    static let progress = "progress"
+    static let isProcessing = "isProcessing"
+    static let modelName = "modelName"
+}

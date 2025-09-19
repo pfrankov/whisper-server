@@ -14,6 +14,35 @@ struct WhisperTranscriptionService {
     
     /// Notification name for when Metal is activated
     static let metalActivatedNotificationName = Notification.Name.whisperMetalActivated
+
+    /// Broadcasts transcription progress changes to observers
+    static func reportTranscriptionProgress(progress: Double, isProcessing: Bool, modelName: String? = nil) {
+        let clampedProgress = max(0.0, min(1.0, progress))
+        var userInfo: [String: Any] = [
+            TranscriptionProgressUserInfoKey.progress: clampedProgress,
+            TranscriptionProgressUserInfoKey.isProcessing: isProcessing
+        ]
+
+        if let modelName {
+            userInfo[TranscriptionProgressUserInfoKey.modelName] = modelName
+        }
+
+        NotificationCenter.default.post(
+            name: .transcriptionProgressUpdated,
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
+    private static func reportTranscriptionProgress(processedChunks: Int, totalChunks: Int, isProcessing: Bool, modelName: String?) {
+        guard totalChunks > 0 else {
+            reportTranscriptionProgress(progress: isProcessing ? 0.0 : 1.0, isProcessing: isProcessing, modelName: modelName)
+            return
+        }
+
+        let progressValue = Double(processedChunks) / Double(totalChunks)
+        reportTranscriptionProgress(progress: progressValue, isProcessing: isProcessing, modelName: modelName)
+    }
     
     // MARK: Audio Processing Constants
     private static let defaultMaxChunkDuration = 30.0 // Only used for traditional chunking when VAD is disabled
@@ -181,10 +210,14 @@ struct WhisperTranscriptionService {
     ///   - prompt: Prompt to improve recognition (optional)
     ///   - modelPaths: Optional model paths to use for initialization if context doesn't exist
     /// - Returns: String with transcription result or nil in case of error
-    static func transcribeAudio(at audioURL: URL, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> String? {
+    static func transcribeAudio(at audioURL: URL,
+                                language: String? = nil,
+                                prompt: String? = nil,
+                                modelPaths: (binPath: URL, encoderDir: URL)? = nil,
+                                modelName: String? = nil) -> String? {
         guard WhisperContextManager.getOrCreateContext(modelPaths: modelPaths) != nil else { return nil }
         guard let chunks = makeChunks(from: audioURL) else { return nil }
-        return processChunks(chunks, language: language, prompt: prompt, modelPaths: modelPaths)
+        return processChunks(chunks, language: language, prompt: prompt, modelPaths: modelPaths, modelName: modelName)
     }
     
     /// Performs transcription of audio data and returns segments with timestamps for subtitle formats
@@ -194,10 +227,14 @@ struct WhisperTranscriptionService {
     ///   - prompt: Prompt to improve recognition (optional)
     ///   - modelPaths: Optional model paths to use for initialization if context doesn't exist
     /// - Returns: Array of segments with timestamps or nil in case of error
-    static func transcribeAudioToSegments(at audioURL: URL, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> [TranscriptionSegment]? {
+    static func transcribeAudioToSegments(at audioURL: URL,
+                                         language: String? = nil,
+                                         prompt: String? = nil,
+                                         modelPaths: (binPath: URL, encoderDir: URL)? = nil,
+                                         modelName: String? = nil) -> [TranscriptionSegment]? {
         guard WhisperContextManager.getOrCreateContext(modelPaths: modelPaths) != nil else { return nil }
         guard let chunks = makeChunks(from: audioURL) else { return nil }
-        return processChunksToSegments(chunks, language: language, prompt: prompt, modelPaths: modelPaths)
+        return processChunksToSegments(chunks, language: language, prompt: prompt, modelPaths: modelPaths, modelName: modelName)
     }
 
     /// Returns audio chunks based on current configuration (VAD or standard chunking)
@@ -224,8 +261,18 @@ struct WhisperTranscriptionService {
     // MARK: - Streaming Methods (for backward compatibility)
     
     /// Alias for transcribeAudioToSegments for backward compatibility
-    static func transcribeAudioWithTimestamps(at audioURL: URL, language: String? = nil, prompt: String? = nil, modelPaths: (binPath: URL, encoderDir: URL)? = nil) -> [TranscriptionSegment]? {
-        return transcribeAudioToSegments(at: audioURL, language: language, prompt: prompt, modelPaths: modelPaths)
+    static func transcribeAudioWithTimestamps(at audioURL: URL,
+                                             language: String? = nil,
+                                             prompt: String? = nil,
+                                             modelPaths: (binPath: URL, encoderDir: URL)? = nil,
+                                             modelName: String? = nil) -> [TranscriptionSegment]? {
+        return transcribeAudioToSegments(
+            at: audioURL,
+            language: language,
+            prompt: prompt,
+            modelPaths: modelPaths,
+            modelName: modelName
+        )
     }
     
     /// Streams transcription with timestamps by processing chunks and calling onSegment for each segment
@@ -238,16 +285,23 @@ struct WhisperTranscriptionService {
     ///   - onCompletion: Callback called when transcription is complete
     /// - Returns: True if streaming started successfully, false otherwise
     static func transcribeAudioStreamWithTimestamps(
-        at audioURL: URL, 
-        language: String? = nil, 
-        prompt: String? = nil, 
+        at audioURL: URL,
+        language: String? = nil,
+        prompt: String? = nil,
         modelPaths: (binPath: URL, encoderDir: URL)? = nil,
+        modelName: String? = nil,
         onSegment: @escaping (TranscriptionSegment) -> Void,
         onCompletion: @escaping () -> Void
     ) -> Bool {
         // Process in background to avoid blocking
         DispatchQueue.global(qos: .userInitiated).async {
-            if let segments = transcribeAudioToSegments(at: audioURL, language: language, prompt: prompt, modelPaths: modelPaths) {
+            if let segments = transcribeAudioToSegments(
+                at: audioURL,
+                language: language,
+                prompt: prompt,
+                modelPaths: modelPaths,
+                modelName: modelName
+            ) {
                 // Stream each segment
                 for segment in segments {
                     onSegment(segment)
@@ -268,16 +322,23 @@ struct WhisperTranscriptionService {
     ///   - onCompletion: Callback called when transcription is complete
     /// - Returns: True if streaming started successfully, false otherwise
     static func transcribeAudioStream(
-        at audioURL: URL, 
-        language: String? = nil, 
-        prompt: String? = nil, 
+        at audioURL: URL,
+        language: String? = nil,
+        prompt: String? = nil,
         modelPaths: (binPath: URL, encoderDir: URL)? = nil,
+        modelName: String? = nil,
         onSegment: @escaping (String) -> Void,
         onCompletion: @escaping () -> Void
     ) -> Bool {
         // Process in background to avoid blocking
         DispatchQueue.global(qos: .userInitiated).async {
-            if let segments = transcribeAudioToSegments(at: audioURL, language: language, prompt: prompt, modelPaths: modelPaths) {
+            if let segments = transcribeAudioToSegments(
+                at: audioURL,
+                language: language,
+                prompt: prompt,
+                modelPaths: modelPaths,
+                modelName: modelName
+            ) {
                 // Stream each segment as text
                 for segment in segments {
                     onSegment(segment.text)
@@ -315,21 +376,24 @@ struct WhisperTranscriptionService {
     }
     
     /// Processes audio chunks and returns the combined transcription
-    private static func processChunks(_ chunks: [(samples: [Float], startTime: Double, endTime: Double)], 
-                                     language: String?, 
-                                     prompt: String?, 
-                                     modelPaths: (binPath: URL, encoderDir: URL)?) -> String? {
+    private static func processChunks(_ chunks: [(samples: [Float], startTime: Double, endTime: Double)],
+                                     language: String?,
+                                     prompt: String?,
+                                     modelPaths: (binPath: URL, encoderDir: URL)?,
+                                     modelName: String?) -> String? {
         guard !chunks.isEmpty else {
             print("❌ No audio chunks to process")
+            reportTranscriptionProgress(progress: 0.0, isProcessing: false, modelName: modelName)
             return nil
         }
-        
+
         print("🔄 Processing \(chunks.count) audio chunk(s)")
+        reportTranscriptionProgress(processedChunks: 0, totalChunks: chunks.count, isProcessing: true, modelName: modelName)
         var transcriptions = [String]()
-        
+
         for (index, chunk) in chunks.enumerated() {
             print("🎯 Processing chunk \(index + 1)/\(chunks.count) (\(String(format: "%.1f", chunk.startTime))s - \(String(format: "%.1f", chunk.endTime))s)")
-            
+
             if let result = transcribeChunk(chunk.samples, language: language, prompt: prompt, modelPaths: modelPaths) {
                 if !result.isEmpty {
                     transcriptions.append(result)
@@ -340,39 +404,49 @@ struct WhisperTranscriptionService {
             } else {
                 print("❌ Failed to transcribe chunk \(index + 1)")
             }
+
+            reportTranscriptionProgress(processedChunks: index + 1, totalChunks: chunks.count, isProcessing: true, modelName: modelName)
         }
-        
+
         let finalResult = transcriptions.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         print("🎉 Final transcription: \(finalResult.isEmpty ? "EMPTY" : String(finalResult.prefix(100)))...")
-        
+
+        reportTranscriptionProgress(processedChunks: chunks.count, totalChunks: chunks.count, isProcessing: false, modelName: modelName)
+
         return finalResult.isEmpty ? nil : finalResult
     }
-    
+
     /// Processes audio chunks and returns segments with timestamps
-    private static func processChunksToSegments(_ chunks: [(samples: [Float], startTime: Double, endTime: Double)], 
-                                               language: String?, 
-                                               prompt: String?, 
-                                               modelPaths: (binPath: URL, encoderDir: URL)?) -> [TranscriptionSegment]? {
+    private static func processChunksToSegments(_ chunks: [(samples: [Float], startTime: Double, endTime: Double)],
+                                               language: String?,
+                                               prompt: String?,
+                                               modelPaths: (binPath: URL, encoderDir: URL)?,
+                                               modelName: String?) -> [TranscriptionSegment]? {
         guard !chunks.isEmpty else {
             print("❌ No audio chunks to process")
+            reportTranscriptionProgress(progress: 0.0, isProcessing: false, modelName: modelName)
             return nil
         }
-        
+
         print("🔄 Processing \(chunks.count) audio chunk(s) for segments")
+        reportTranscriptionProgress(processedChunks: 0, totalChunks: chunks.count, isProcessing: true, modelName: modelName)
         var allSegments = [TranscriptionSegment]()
-        
+
         for (index, chunk) in chunks.enumerated() {
             print("🎯 Processing chunk \(index + 1)/\(chunks.count) (\(String(format: "%.1f", chunk.startTime))s - \(String(format: "%.1f", chunk.endTime))s)")
-            
+
             if let segments = transcribeChunkToSegments(chunk.samples, chunkStartTime: chunk.startTime, language: language, prompt: prompt, modelPaths: modelPaths) {
                 allSegments.append(contentsOf: segments)
                 print("✅ Chunk \(index + 1) produced \(segments.count) segment(s)")
             } else {
                 print("❌ Failed to transcribe chunk \(index + 1) to segments")
             }
+
+            reportTranscriptionProgress(processedChunks: index + 1, totalChunks: chunks.count, isProcessing: true, modelName: modelName)
         }
-        
+
         print("🎉 Total segments generated: \(allSegments.count)")
+        reportTranscriptionProgress(processedChunks: chunks.count, totalChunks: chunks.count, isProcessing: false, modelName: modelName)
         return allSegments.isEmpty ? nil : allSegments
     }
     

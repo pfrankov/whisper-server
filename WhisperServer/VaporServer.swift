@@ -354,6 +354,15 @@ final class VaporServer {
                 }
             }
 
+            let progressModelName: String? = {
+                switch provider {
+                case .whisper:
+                    return self.modelManager.selectedModelName
+                case .fluid:
+                    return fluidModelDescriptor?.displayName ?? FluidTranscriptionService.defaultModel.displayName
+                }
+            }()
+
             if whisperReq.stream == true {
                 // Check if client supports SSE
                 let useSSE = self.supportsSSE(req)
@@ -382,6 +391,7 @@ final class VaporServer {
                             language: whisperReq.language,
                             prompt: whisperReq.prompt,
                             modelPaths: modelPaths,
+                            modelName: progressModelName,
                             onSegment: { segment in
                                 req.eventLoop.execute {
                                     segmentCounter += 1
@@ -483,7 +493,8 @@ final class VaporServer {
                                 at: tempFileURL,
                                 language: whisperReq.language,
                                 prompt: whisperReq.prompt,
-                            modelPaths: modelPaths,
+                                modelPaths: modelPaths,
+                                modelName: progressModelName,
                                 onSegment: { segment in
                                     req.eventLoop.execute {
                                         let output: String
@@ -547,8 +558,20 @@ final class VaporServer {
                             // Do the work asynchronously, then emit a single chunk
                             Task {
                                 let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                                let activeModelName = progressModelName ?? descriptor.displayName
+                                WhisperTranscriptionService.reportTranscriptionProgress(
+                                    progress: 0.0,
+                                    isProcessing: true,
+                                    modelName: activeModelName
+                                )
                                 let selectedLanguage = fluidLanguage
+                                var finalProgress: Double = 0.0
                                 defer {
+                                    WhisperTranscriptionService.reportTranscriptionProgress(
+                                        progress: finalProgress,
+                                        isProcessing: false,
+                                        modelName: activeModelName
+                                    )
                                     req.eventLoop.execute {
                                         self.finishStream(
                                             req: req,
@@ -597,6 +620,7 @@ final class VaporServer {
                                     default:
                                         output = trimmed.isEmpty ? "No speech detected\n" : (trimmed + "\n")
                                     }
+                                    finalProgress = 1.0
 
                                     req.eventLoop.execute {
                                         self.writeChunk(output, req: req, useSSE: useSSE) { buffer in
@@ -631,7 +655,11 @@ final class VaporServer {
                         break
                     }
                     if let segments = WhisperTranscriptionService.transcribeAudioWithTimestamps(
-                        at: tempFileURL, language: whisperReq.language, prompt: whisperReq.prompt, modelPaths: modelPaths
+                        at: tempFileURL,
+                        language: whisperReq.language,
+                        prompt: whisperReq.prompt,
+                        modelPaths: modelPaths,
+                        modelName: progressModelName
                     ) {
                         switch responseFormat {
                         case .srt:
@@ -656,7 +684,11 @@ final class VaporServer {
                     switch provider {
                     case .whisper:
                         if let transcription = WhisperTranscriptionService.transcribeAudio(
-                            at: tempFileURL, language: whisperReq.language, prompt: whisperReq.prompt, modelPaths: modelPaths
+                            at: tempFileURL,
+                            language: whisperReq.language,
+                            prompt: whisperReq.prompt,
+                            modelPaths: modelPaths,
+                            modelName: progressModelName
                         ) {
                             switch responseFormat {
                             case .json:
@@ -682,11 +714,26 @@ final class VaporServer {
                         }
                     case .fluid:
                         let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                        let activeModelName = progressModelName ?? descriptor.displayName
+                        WhisperTranscriptionService.reportTranscriptionProgress(
+                            progress: 0.0,
+                            isProcessing: true,
+                            modelName: activeModelName
+                        )
+                        var finalProgress: Double = 0.0
+                        defer {
+                            WhisperTranscriptionService.reportTranscriptionProgress(
+                                progress: finalProgress,
+                                isProcessing: false,
+                                modelName: activeModelName
+                            )
+                        }
                         if let transcription = await FluidTranscriptionService.transcribeText(
                             at: tempFileURL,
                             language: fluidLanguage,
                             model: descriptor
                         ) {
+                            finalProgress = 1.0
                             switch responseFormat {
                             case .json:
                                 let jsonResponse = ["text": transcription]

@@ -107,19 +107,26 @@ final class ModelObserver: ObservableObject {
         )
         
         NotificationCenter.default.addObserver(
-            self, 
-            selector: #selector(handleModelStatusChanged), 
-            name: .modelManagerStatusChanged, 
+            self,
+            selector: #selector(handleModelStatusChanged),
+            name: .modelManagerStatusChanged,
             object: nil
         )
-        
+
         NotificationCenter.default.addObserver(
-            self, 
-            selector: #selector(handleModelProgressChanged), 
-            name: .modelManagerProgressChanged, 
+            self,
+            selector: #selector(handleModelProgressChanged),
+            name: .modelManagerProgressChanged,
             object: nil
         )
-        
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTranscriptionProgressUpdated(_:)),
+            name: .transcriptionProgressUpdated,
+            object: nil
+        )
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleMetalActivated),
@@ -172,14 +179,28 @@ final class ModelObserver: ObservableObject {
             self.menuBarService?.showModelStatus(status)
         }
     }
-    
+
     @objc private func handleModelProgressChanged() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self,
                   let progress = self.modelManager.downloadProgress else { return }
-            
+
             self.menuBarService?.showDownloadProgress(progress)
             self.serverCoordinator?.stopServer()
+        }
+    }
+
+    @objc private func handleTranscriptionProgressUpdated(_ notification: Notification) {
+        let progressValue = notification.userInfo?[TranscriptionProgressUserInfoKey.progress] as? Double ?? 0.0
+        let isProcessing = notification.userInfo?[TranscriptionProgressUserInfoKey.isProcessing] as? Bool ?? false
+        let modelName = notification.userInfo?[TranscriptionProgressUserInfoKey.modelName] as? String
+
+        DispatchQueue.main.async { [weak self] in
+            self?.menuBarService?.updateTranscriptionProgress(
+                progress: progressValue,
+                isProcessing: isProcessing,
+                modelName: modelName
+            )
         }
     }
     

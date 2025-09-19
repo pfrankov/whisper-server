@@ -22,6 +22,13 @@ final class MenuBarService: ObservableObject {
     private var statusItem: NSStatusItem?
     private let modelManager: ModelManager
     private weak var serverCoordinator: ServerCoordinator?
+    private let idleIconName = "waveform"
+    private let processingIconName = "waveform.circle.fill"
+    private var currentIconName: String?
+    private var progressResetWorkItem: DispatchWorkItem?
+    private var baseTooltip = "WhisperServer - Ready"
+    private var isCurrentlyProcessing = false
+    private let progressResetDelay: TimeInterval = 1.0
     
     // MARK: - Initialization
     
@@ -59,27 +66,23 @@ final class MenuBarService: ObservableObject {
     }
     
     func updateMetalStatus(isActive: Bool, modelName: String? = nil, isCaching: Bool = false, failed: Bool = false) {
-        guard let menu = statusItem?.menu,
-              let statusMenuItem = menu.item(withTag: MenuItemTags.status.rawValue) else { return }
-        
         DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            let tooltip: String
             if isCaching {
-                statusMenuItem.title = "Metal: Caching shaders..."
-                statusMenuItem.image = NSImage(systemSymbolName: "arrow.clockwise.circle", accessibilityDescription: nil)
-                self?.updateStatusIcon("rays")
+                tooltip = "WhisperServer - Caching shaders..."
             } else if failed {
-                statusMenuItem.title = "Metal: Using CPU fallback"
-                statusMenuItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
-                self?.updateStatusIcon("waveform")
+                tooltip = "WhisperServer - GPU unavailable (CPU fallback)"
             } else if isActive, let modelName = modelName {
-                statusMenuItem.title = "Metal: Active with \(modelName) model (GPU acceleration)"
-                statusMenuItem.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
-                self?.updateStatusIcon("waveform")
-                self?.updateTooltip("WhisperServer - Active with \(modelName) model")
+                tooltip = "WhisperServer - Active with \(modelName) model"
             } else {
-                statusMenuItem.title = "Inactive (will initialize on first request)"
-                statusMenuItem.image = NSImage(systemSymbolName: "sleep", accessibilityDescription: "Sleep")
-                self?.updateStatusIcon("sleep")
+                tooltip = "WhisperServer - Ready"
+            }
+
+            self.baseTooltip = tooltip
+            if !self.isCurrentlyProcessing {
+                self.updateTooltip(tooltip)
             }
         }
     }
@@ -110,7 +113,7 @@ final class MenuBarService: ObservableObject {
     
     func showDownloadProgress(_ progress: Double) {
         guard let menu = statusItem?.menu else { return }
-        
+
         DispatchQueue.main.async {
             let progressIndex = menu.items.firstIndex { $0.title.hasPrefix("Download:") } ?? -1
             let progressPercent = Int(progress * 100)
@@ -132,25 +135,55 @@ final class MenuBarService: ObservableObject {
             }
         }
     }
+
+    func updateTranscriptionProgress(progress: Double, isProcessing: Bool, modelName: String?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  let menu = self.statusItem?.menu else { return }
+
+            self.progressResetWorkItem?.cancel()
+            self.progressResetWorkItem = nil
+
+            let clampedProgress = max(0.0, min(1.0, progress))
+            let percentValue = Int((clampedProgress * 100).rounded())
+            let shouldDisplayProgressItem = isProcessing || clampedProgress > 0.0
+            let resolvedModelName = self.resolveModelName(from: modelName)
+
+            if shouldDisplayProgressItem {
+                let progressMenuItem = self.ensureProgressMenuItem(in: menu)
+                progressMenuItem.title = "\(resolvedModelName): \(percentValue)%"
+            } else {
+                self.removeProgressMenuItemIfNeeded(in: menu)
+            }
+
+            let processingNow = isProcessing || (clampedProgress > 0.0 && clampedProgress < 1.0)
+            self.isCurrentlyProcessing = processingNow
+            self.applyStatusIcon(isProcessing: processingNow)
+
+            if processingNow {
+                self.updateTooltip("WhisperServer - Processing \(resolvedModelName): \(percentValue)%")
+            } else {
+                self.updateTooltip(self.baseTooltip)
+                if shouldDisplayProgressItem {
+                    self.scheduleProgressResetIfNeeded(currentPercent: percentValue)
+                }
+            }
+        }
+    }
     
     // MARK: - Private Methods
     
     private func configureStatusButton() {
         guard let button = statusItem?.button else { return }
-        
-        button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Whisper Server")
-        button.toolTip = "WhisperServer - Initializing..."
+
+        currentIconName = idleIconName
+        button.image = NSImage(systemSymbolName: idleIconName, accessibilityDescription: "Whisper Server")
+        baseTooltip = "WhisperServer - Initializing..."
+        button.toolTip = baseTooltip
     }
     
     private func createMenu() {
         let menu = NSMenu()
-        
-        // Metal status
-        let metalItem = NSMenuItem(title: "Metal: Initializing...", action: nil, keyEquivalent: "")
-        metalItem.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)
-        metalItem.toolTip = "GPU acceleration status - Loading shaders for faster transcription"
-        metalItem.tag = MenuItemTags.status.rawValue
-        menu.addItem(metalItem)
         
         // Server status
         let serverItem = NSMenuItem(title: "Server: Waiting for initialization...", action: nil, keyEquivalent: "")
@@ -205,10 +238,67 @@ final class MenuBarService: ObservableObject {
         parentMenu.addItem(modelSelectionMenuItem)
     }
     
-    private func updateStatusIcon(_ iconName: String) {
-        statusItem?.button?.image = NSImage(systemSymbolName: iconName, accessibilityDescription: "WhisperServer")
+    private func applyStatusIcon(isProcessing: Bool) {
+        let desiredIcon = isProcessing ? processingIconName : idleIconName
+        guard currentIconName != desiredIcon else { return }
+
+        statusItem?.button?.image = NSImage(systemSymbolName: desiredIcon, accessibilityDescription: "WhisperServer")
+        currentIconName = desiredIcon
     }
-    
+
+    private func ensureProgressMenuItem(in menu: NSMenu) -> NSMenuItem {
+        if let existingItem = menu.item(withTag: MenuItemTags.status.rawValue) {
+            return existingItem
+        }
+
+        let progressItem = NSMenuItem(title: "Transcription", action: nil, keyEquivalent: "")
+        progressItem.isEnabled = false
+        progressItem.toolTip = "Current transcription progress"
+        progressItem.tag = MenuItemTags.status.rawValue
+        menu.insertItem(progressItem, at: 0)
+        return progressItem
+    }
+
+    private func resolveModelName(from reportedName: String?) -> String {
+        if let trimmed = reportedName?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
+            return trimmed
+        }
+
+        if modelManager.selectedProvider == .fluid {
+            return FluidTranscriptionService.defaultModel.displayName
+        }
+
+        return modelManager.selectedModelName ?? "Selected model"
+    }
+
+    private func removeProgressMenuItemIfNeeded(in menu: NSMenu? = nil) {
+        guard let menu = menu ?? statusItem?.menu else { return }
+        let index = menu.indexOfItem(withTag: MenuItemTags.status.rawValue)
+        if index >= 0 {
+            menu.removeItem(at: index)
+        }
+    }
+
+    private func scheduleProgressResetIfNeeded(currentPercent: Int) {
+        guard currentPercent != 0 else {
+            removeProgressMenuItemIfNeeded()
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+
+            self.removeProgressMenuItemIfNeeded()
+            self.isCurrentlyProcessing = false
+            self.applyStatusIcon(isProcessing: false)
+            self.updateTooltip(self.baseTooltip)
+            self.progressResetWorkItem = nil
+        }
+
+        progressResetWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + progressResetDelay, execute: workItem)
+    }
+
     private func updateTooltip(_ tooltip: String) {
         statusItem?.button?.toolTip = tooltip
     }

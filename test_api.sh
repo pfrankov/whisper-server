@@ -64,12 +64,15 @@ import os, re
 path = os.environ.get("FLUID_SOURCE_PATH")
 if not path or not os.path.exists(path):
     raise SystemExit
-pattern = re.compile(r'ModelDescriptor\(\s*id:\s*"([^"]+)"')
 with open(path, 'r', encoding='utf-8') as handle:
-    for raw in handle:
-        match = pattern.search(raw)
-        if match:
-            print(match.group(1))
+    contents = handle.read()
+
+pattern = re.compile(r'ModelDescriptor\(\s*id:\s*"([^"]+)"', re.DOTALL)
+seen = set()
+for model_id in pattern.findall(contents):
+    if model_id not in seen:
+        print(model_id)
+        seen.add(model_id)
 PY
     )
     unset FLUID_SOURCE_PATH
@@ -916,15 +919,15 @@ print_banner
 check_server_ready
 run_models_listing_test
 
+if [ ${#FLUID_MODELS[@]} -gt 0 ]; then
+    for model in "${FLUID_MODELS[@]}"; do
+        run_fluid_suite "$model"
+    done
+fi
+
 for model in "${WHISPER_MODELS[@]}"; do
     run_whisper_suite "$model"
 done
-
-if [ ${#FLUID_MODELS[@]} -gt 0 ]; then
-  for model in "${FLUID_MODELS[@]}"; do
-      run_fluid_suite "$model"
-  done
-fi
 
 
 run_negative_tests
