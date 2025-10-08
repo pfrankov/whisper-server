@@ -109,6 +109,171 @@ record_fail() {
     fi
 }
 
+AVAILABLE_GROUPS=("models" "whisper" "whisper-concurrency" "fluid" "negative")
+SELECTED_GROUPS=()
+
+usage() {
+    local exit_code="${1:-0}"
+    cat <<'EOF'
+Usage: ./test_api.sh [--only groups] [--list-groups] [--help]
+
+Options:
+  --only groups     Comma-separated list of test groups to run.
+                    Use --list-groups to see all available options.
+  --list-groups     Show available test groups and exit.
+  -h, --help        Show this help message and exit.
+
+Examples:
+  ./test_api.sh --only=whisper            # run full Whisper suite only
+  ./test_api.sh --only=whisper-concurrency # run only the parallel Whisper test
+  ./test_api.sh --only=models,negative    # run specific groups
+EOF
+    exit "$exit_code"
+}
+
+list_groups() {
+    printf "Available test groups:\n"
+    printf "  models                - GET /v1/models smoke test\n"
+    printf "  whisper               - Full Whisper provider suite\n"
+    printf "  whisper-concurrency   - Parallel Whisper transcription test\n"
+    printf "  fluid                 - Full Fluid provider suite\n"
+    printf "  negative              - Negative-path error responses\n"
+}
+
+canonicalize_group() {
+    local raw="$1"
+    local lowered
+    lowered=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+    case "$lowered" in
+        all|everything)
+            printf 'all\n'
+            ;;
+        models|model|catalog)
+            printf 'models\n'
+            ;;
+        whisper|whisper-all|whisperfull|whisper_suite)
+            printf 'whisper\n'
+            ;;
+        whisper-concurrency|whisper_parallel|whisper-parallel|parallel|concurrency)
+            printf 'whisper-concurrency\n'
+            ;;
+        fluid|fluidaudio)
+            printf 'fluid\n'
+            ;;
+        negative|negatives|errors|error-cases)
+            printf 'negative\n'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+add_selected_groups_from_csv() {
+    local csv="$1"
+    if [ -z "$csv" ]; then
+        SELECTED_GROUPS=()
+        return
+    fi
+
+    local IFS=','
+    local -a raw_items=()
+    read -r -a raw_items <<< "$csv"
+
+    local -a new_selection=()
+    if [ ${#SELECTED_GROUPS[@]} -gt 0 ]; then
+        new_selection+=("${SELECTED_GROUPS[@]}")
+    fi
+    for item in "${raw_items[@]}"; do
+        local trimmed
+        trimmed=$(printf '%s' "$item" | tr -d '[:space:]')
+        if [ -z "$trimmed" ]; then
+            continue
+        fi
+        local canonical
+        if ! canonical=$(canonicalize_group "$trimmed"); then
+            printf "Unknown test group: %s\n" "$trimmed" >&2
+            usage 1
+        fi
+        if [ "$canonical" = "all" ]; then
+            SELECTED_GROUPS=()
+            return
+        fi
+        local exists=0
+        if [ ${#new_selection[@]} -gt 0 ]; then
+            for existing in "${new_selection[@]}"; do
+                if [ "$existing" = "$canonical" ]; then
+                    exists=1
+                    break
+                fi
+            done
+        fi
+        if [ $exists -eq 0 ]; then
+            new_selection+=("$canonical")
+        fi
+    done
+    if [ ${#new_selection[@]} -gt 0 ]; then
+        SELECTED_GROUPS=("${new_selection[@]}")
+    else
+        SELECTED_GROUPS=()
+    fi
+}
+
+should_run_group() {
+    local group="$1"
+    if [ ${#SELECTED_GROUPS[@]} -eq 0 ]; then
+        return 0
+    fi
+    for candidate in "${SELECTED_GROUPS[@]}"; do
+        if [ "$candidate" = "$group" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+parse_cli_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                usage 0
+                ;;
+            --list-groups)
+                list_groups
+                exit 0
+                ;;
+            --only=*)
+                add_selected_groups_from_csv "${1#*=}"
+                ;;
+            --only)
+                if [[ $# -lt 2 ]]; then
+                    printf "--only requires an argument\n" >&2
+                    usage 1
+                fi
+                shift
+                add_selected_groups_from_csv "$1"
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                printf "Unknown option: %s\n" "$1" >&2
+                usage 1
+                ;;
+            *)
+                printf "Unexpected argument: %s\n" "$1" >&2
+                usage 1
+                ;;
+        esac
+        shift
+    done
+    if [[ $# -gt 0 ]]; then
+        printf "Unexpected arguments after options: %s\n" "$*" >&2
+        usage 1
+    fi
+}
+
 run_curl_basic() {
     set +e
     local response
@@ -365,6 +530,33 @@ validate_sse_srt() { validate_sse_stream "srt"; }
 validate_sse_vtt() { validate_sse_stream "vtt"; }
 validate_sse_verbose() { validate_sse_stream "verbose_json"; }
 
+validate_json_text_payload() {
+    local payload="$1"
+    if [ -z "${payload//[[:space:]]/}" ]; then
+        printf 'JSON payload is empty\n' >&2
+        return 1
+    fi
+
+    PAYLOAD_FOR_VALIDATE="$payload" python3 - <<'PY'
+import json, os, sys
+payload = os.environ.get("PAYLOAD_FOR_VALIDATE", "")
+if payload is None or not payload.strip():
+    print("JSON payload is empty", file=sys.stderr)
+    sys.exit(1)
+try:
+    data = json.loads(payload)
+except Exception as exc:  # noqa: BLE001
+    print(f"JSON decode failed: {exc}; payload={payload!r}", file=sys.stderr)
+    sys.exit(1)
+text = data.get("text")
+if not isinstance(text, str) or not text.strip():
+    print("Field 'text' missing or empty", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+    return $?
+}
+
 validate_model_list() {
     local whisper_expected=""
     local fluid_expected=""
@@ -596,6 +788,108 @@ run_sse_test() {
     echo ""
 }
 
+run_concurrent_requests_test() {
+    local name="$1"
+    local model="$2"
+    local -a curl_args=(-sS -w '\n%{http_code}' -X POST "$SERVER_URL/v1/audio/transcriptions" -F "file=@$TEST_AUDIO" -F "response_format=json")
+    if [ -n "$model" ]; then
+        curl_args+=(-F "model=$model")
+    fi
+
+    local command
+    command=$(render_command "${curl_args[@]}")
+    echo -e "${BLUE}🤝 Testing: $name${NC}"
+    echo -e "${YELLOW}Command (twice in parallel): $command${NC}"
+
+    local tmp1 tmp2
+    tmp1=$(mktemp)
+    tmp2=$(mktemp)
+
+    set +e
+    (curl "${curl_args[@]}" >"$tmp1" 2>&1) &
+    local pid1=$!
+    (curl "${curl_args[@]}" >"$tmp2" 2>&1) &
+    local pid2=$!
+
+    wait "$pid1"
+    local exit1=$?
+    wait "$pid2"
+    local exit2=$?
+    set -e
+
+    local raw1="" raw2=""
+    [ -f "$tmp1" ] && raw1=$(cat "$tmp1")
+    [ -f "$tmp2" ] && raw2=$(cat "$tmp2")
+
+    if [ $exit1 -ne 0 ]; then
+        record_fail "$name" "First curl exited with $exit1"
+        if [ -n "$raw1" ]; then
+            echo "   Output: $raw1"
+        fi
+        rm -f "$tmp1" "$tmp2"
+        echo ""
+        return
+    fi
+    if [ $exit2 -ne 0 ]; then
+        record_fail "$name" "Second curl exited with $exit2"
+        if [ -n "$raw2" ]; then
+            echo "   Output: $raw2"
+        fi
+        rm -f "$tmp1" "$tmp2"
+        echo ""
+        return
+    fi
+
+    local status1 status2 body1 body2
+    status1="${raw1##*$'\n'}"
+    body1="${raw1%$'\n'$status1}"
+    status2="${raw2##*$'\n'}"
+    body2="${raw2%$'\n'$status2}"
+
+    if [[ ! "$status1" =~ ^[0-9]{3}$ ]]; then
+        record_fail "$name" "First response missing HTTP status"
+        echo "   Output: $raw1"
+        rm -f "$tmp1" "$tmp2"
+        echo ""
+        return
+    fi
+    if [[ ! "$status2" =~ ^[0-9]{3}$ ]]; then
+        record_fail "$name" "Second response missing HTTP status"
+        echo "   Output: $raw2"
+        rm -f "$tmp1" "$tmp2"
+        echo ""
+        return
+    fi
+
+    if [ "$status1" != "200" ] || [ "$status2" != "200" ]; then
+        record_fail "$name" "Expected both HTTP 200, got $status1 and $status2"
+        echo "   Response 1: $body1"
+        echo "   Response 2: $body2"
+        rm -f "$tmp1" "$tmp2"
+        echo ""
+        return
+    fi
+
+    if ! validate_json_text_payload "$body1"; then
+        record_fail "$name" "First response failed validation"
+        echo "   Response: $body1"
+        rm -f "$tmp1" "$tmp2"
+        echo ""
+        return
+    fi
+    if ! validate_json_text_payload "$body2"; then
+        record_fail "$name" "Second response failed validation"
+        echo "   Response: $body2"
+        rm -f "$tmp1" "$tmp2"
+        echo ""
+        return
+    fi
+
+    rm -f "$tmp1" "$tmp2"
+    record_pass "$name"
+    echo ""
+}
+
 run_models_listing_test() {
     local name="Model catalog"
     echo -e "${BLUE}🧾 Testing: $name${NC}"
@@ -653,162 +947,181 @@ print_banner() {
 
 run_whisper_suite() {
     local CURRENT_MODEL="$1"
+    local run_full_suite=0
+    local run_concurrency_suite=0
+
+    if should_run_group "whisper"; then
+        run_full_suite=1
+    fi
+    if should_run_group "whisper-concurrency"; then
+        run_concurrency_suite=1
+    fi
+    if [ $run_full_suite -eq 0 ] && [ $run_concurrency_suite -eq 0 ]; then
+        return
+    fi
+
     printf "%b==============================%b\n" "$BLUE" "$NC"
     printf "%b🧬 WHISPER MODEL UNDER TEST: %s%b\n" "$BLUE" "$CURRENT_MODEL" "$NC"
     printf "%b==============================%b\n\n" "$BLUE" "$NC"
 
-    run_http_test "JSON Response" 200 validate_json_text \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "model=$CURRENT_MODEL"
+    if [ $run_full_suite -eq 1 ]; then
+        run_http_test "JSON Response" 200 validate_json_text \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test "JSON Response (explicit)" 200 validate_json_text \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=json" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test "JSON Response (explicit)" 200 validate_json_text \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=json" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test "Plain text response" 200 validate_text_plain \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=text" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test "Plain text response" 200 validate_text_plain \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=text" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test "Language parameter" 200 validate_json_text \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "language=en" \
-        -F "response_format=json" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test "Language parameter" 200 validate_json_text \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "language=en" \
+            -F "response_format=json" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test "Prompt parameter" 200 validate_json_text \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "prompt=This is a test" \
-        -F "response_format=json" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test "Prompt parameter" 200 validate_json_text \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "prompt=This is a test" \
+            -F "response_format=json" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test "Missing file error" 400 validate_json_error \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test "Missing file error" 400 validate_json_error \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test "Invalid format error" 400 validate_json_error \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=invalid" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test "Invalid format error" 400 validate_json_error \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=invalid" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test_with_headers "SRT format" 200 validate_srt_plain "application/x-subrip" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=srt" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test_with_headers "SRT format" 200 validate_srt_plain "application/x-subrip" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=srt" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test_with_headers "VTT format" 200 validate_vtt_plain "text/vtt" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=vtt" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test_with_headers "VTT format" 200 validate_vtt_plain "text/vtt" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=vtt" \
+            -F "model=$CURRENT_MODEL"
 
-    run_http_test "Verbose JSON format" 200 validate_verbose_json \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=verbose_json" \
-        -F "model=$CURRENT_MODEL"
+        run_http_test "Verbose JSON format" 200 validate_verbose_json \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=verbose_json" \
+            -F "model=$CURRENT_MODEL"
 
-    run_chunked_test "Chunked SRT streaming" "application/x-subrip" validate_srt_plain \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=srt" \
-        -F "stream=true" \
-        -F "model=$CURRENT_MODEL"
+        run_chunked_test "Chunked SRT streaming" "application/x-subrip" validate_srt_plain \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=srt" \
+            -F "stream=true" \
+            -F "model=$CURRENT_MODEL"
 
-    run_chunked_test "Chunked VTT streaming" "text/vtt" validate_vtt_plain \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=vtt" \
-        -F "stream=true" \
-        -F "model=$CURRENT_MODEL"
+        run_chunked_test "Chunked VTT streaming" "text/vtt" validate_vtt_plain \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=vtt" \
+            -F "stream=true" \
+            -F "model=$CURRENT_MODEL"
 
-    run_sse_test "SSE Text" validate_sse_text \
-        -H "Accept: text/event-stream" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=text" \
-        -F "stream=true" \
-        -F "model=$CURRENT_MODEL"
+        run_sse_test "SSE Text" validate_sse_text \
+            -H "Accept: text/event-stream" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=text" \
+            -F "stream=true" \
+            -F "model=$CURRENT_MODEL"
 
-    run_sse_test "SSE JSON" validate_sse_json \
-        -H "Accept: text/event-stream" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=json" \
-        -F "stream=true" \
-        -F "model=$CURRENT_MODEL"
+        run_sse_test "SSE JSON" validate_sse_json \
+            -H "Accept: text/event-stream" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=json" \
+            -F "stream=true" \
+            -F "model=$CURRENT_MODEL"
 
-    run_sse_test "SSE SRT" validate_sse_srt \
-        -H "Accept: text/event-stream" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=srt" \
-        -F "stream=true" \
-        -F "model=$CURRENT_MODEL"
+        run_sse_test "SSE SRT" validate_sse_srt \
+            -H "Accept: text/event-stream" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=srt" \
+            -F "stream=true" \
+            -F "model=$CURRENT_MODEL"
 
-    run_sse_test "SSE VTT" validate_sse_vtt \
-        -H "Accept: text/event-stream" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=vtt" \
-        -F "stream=true" \
-        -F "model=$CURRENT_MODEL"
+        run_sse_test "SSE VTT" validate_sse_vtt \
+            -H "Accept: text/event-stream" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=vtt" \
+            -F "stream=true" \
+            -F "model=$CURRENT_MODEL"
 
-    run_sse_test "SSE Verbose JSON" validate_sse_verbose \
-        -H "Accept: text/event-stream" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=verbose_json" \
-        -F "stream=true" \
-        -F "model=$CURRENT_MODEL"
+        run_sse_test "SSE Verbose JSON" validate_sse_verbose \
+            -H "Accept: text/event-stream" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=verbose_json" \
+            -F "stream=true" \
+            -F "model=$CURRENT_MODEL"
 
-    run_chunked_test "Chunked text fallback" "text/plain; charset=utf-8" validate_chunked_text \
-        -H "Accept: application/json" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=text" \
-        -F "stream=true" \
-        -F "model=$CURRENT_MODEL"
+        run_chunked_test "Chunked text fallback" "text/plain; charset=utf-8" validate_chunked_text \
+            -H "Accept: application/json" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=text" \
+            -F "stream=true" \
+            -F "model=$CURRENT_MODEL"
 
-    echo -e "${BLUE}🚀 Performance Test${NC}"
-    echo -e "${YELLOW}Measuring response time...${NC}"
-    local start end duration
-    start=$(date +%s.%N)
-    if run_curl_basic -X POST "$SERVER_URL/v1/audio/transcriptions" -F "file=@$TEST_AUDIO" -F "response_format=text" -F "model=$CURRENT_MODEL"; then
-        end=$(date +%s.%N)
-        duration=$(START_TIME="$start" END_TIME="$end" python3 - <<'PY'
+        echo -e "${BLUE}🚀 Performance Test${NC}"
+        echo -e "${YELLOW}Measuring response time...${NC}"
+        local start end duration
+        start=$(date +%s.%N)
+        if run_curl_basic -X POST "$SERVER_URL/v1/audio/transcriptions" -F "file=@$TEST_AUDIO" -F "response_format=text" -F "model=$CURRENT_MODEL"; then
+            end=$(date +%s.%N)
+            duration=$(START_TIME="$start" END_TIME="$end" python3 - <<'PY'
 import os
 start=float(os.environ["START_TIME"])
 end=float(os.environ["END_TIME"])
 print(f"{end-start:.3f}")
 PY
 )
-        printf "%b✅ Performance test completed in %s seconds%b\n" "$GREEN" "$duration" "$NC"
-        printf "%bResponse:%b %s\n" "$GREEN" "$NC" "$LAST_BODY"
-    else
-        record_fail "Performance Test" "curl failed: $CURL_ERROR"
+            printf "%b✅ Performance test completed in %s seconds%b\n" "$GREEN" "$duration" "$NC"
+            printf "%bResponse:%b %s\n" "$GREEN" "$NC" "$LAST_BODY"
+        else
+            record_fail "Performance Test" "curl failed: $CURL_ERROR"
+        fi
+        echo ""
+
+        run_http_test_with_headers "JSON headers" 200 validate_json_text "application/json" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=json" \
+            -F "model=$CURRENT_MODEL"
+
+        run_http_test_with_headers "Text headers" 200 validate_text_plain "text/plain; charset=utf-8" \
+            -X POST "$SERVER_URL/v1/audio/transcriptions" \
+            -F "file=@$TEST_AUDIO" \
+            -F "response_format=text" \
+            -F "model=$CURRENT_MODEL"
     fi
-    echo ""
 
-    run_http_test_with_headers "JSON headers" 200 validate_json_text "application/json" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=json" \
-        -F "model=$CURRENT_MODEL"
-
-    run_http_test_with_headers "Text headers" 200 validate_text_plain "text/plain; charset=utf-8" \
-        -X POST "$SERVER_URL/v1/audio/transcriptions" \
-        -F "file=@$TEST_AUDIO" \
-        -F "response_format=text" \
-        -F "model=$CURRENT_MODEL"
+    if [ $run_full_suite -eq 1 ] || [ $run_concurrency_suite -eq 1 ]; then
+        run_concurrent_requests_test "Concurrent JSON requests" "$CURRENT_MODEL"
+    fi
 }
 
 run_fluid_suite() {
@@ -915,20 +1228,29 @@ summarize() {
     fi
 }
 
+parse_cli_args "$@"
+
 print_banner
 check_server_ready
-run_models_listing_test
 
-if [ ${#FLUID_MODELS[@]} -gt 0 ]; then
+if should_run_group "models"; then
+    run_models_listing_test
+fi
+
+if [ ${#FLUID_MODELS[@]} -gt 0 ] && should_run_group "fluid"; then
     for model in "${FLUID_MODELS[@]}"; do
         run_fluid_suite "$model"
     done
 fi
 
-for model in "${WHISPER_MODELS[@]}"; do
-    run_whisper_suite "$model"
-done
+if should_run_group "whisper" || should_run_group "whisper-concurrency"; then
+    for model in "${WHISPER_MODELS[@]}"; do
+        run_whisper_suite "$model"
+    done
+fi
 
+if should_run_group "negative"; then
+    run_negative_tests
+fi
 
-run_negative_tests
 summarize

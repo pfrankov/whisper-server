@@ -2,6 +2,35 @@ import Foundation
 import Vapor
 import FluidAudio
 
+/// Serial queue ensuring only one transcription request is processed at a time.
+actor TranscriptionRequestQueue {
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var isProcessing = false
+
+    /// Suspends the caller until it becomes their turn to process.
+    func waitTurn() async {
+        if !isProcessing {
+            isProcessing = true
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+        isProcessing = true
+    }
+
+    /// Marks the current request as finished and resumes the next waiter if present.
+    func finishTurn() {
+        if let next = waiters.first {
+            waiters.removeFirst()
+            next.resume()
+        } else {
+            isProcessing = false
+        }
+    }
+}
+
 /// HTTP server for processing Whisper API requests using Vapor
 final class VaporServer {
     // MARK: - Properties
@@ -14,6 +43,9 @@ final class VaporServer {
     
     /// Model manager instance
     private let modelManager: ModelManager
+    
+    /// Serial queue coordinating transcription requests
+    private let transcriptionQueue = TranscriptionRequestQueue()
 
     /// Tracks the Whisper model currently loaded in the transcription context
     private var activeWhisperModelID: String?
@@ -266,6 +298,22 @@ final class VaporServer {
             
             let whisperReq = try req.content.decode(WhisperRequest.self)
             
+            await self.transcriptionQueue.waitTurn()
+            var queueReleased = false
+            let releaseQueue: () -> Void = {
+                if queueReleased { return }
+                queueReleased = true
+                Task {
+                    await self.transcriptionQueue.finishTurn()
+                }
+            }
+            var shouldReleaseQueueOnExit = true
+            defer {
+                if shouldReleaseQueueOnExit {
+                    releaseQueue()
+                }
+            }
+            
             // Generate a temporary file path
             let tempDir = FileManager.default.temporaryDirectory
             let fileName = whisperReq.file.filename
@@ -366,6 +414,7 @@ final class VaporServer {
             if whisperReq.stream == true {
                 // Check if client supports SSE
                 let useSSE = self.supportsSSE(req)
+                shouldReleaseQueueOnExit = false
                 // Choose the appropriate streaming method based on format
                 switch responseFormat {
                 case .srt, .vtt, .verboseJson:
@@ -375,6 +424,7 @@ final class VaporServer {
                         var headers = HTTPHeaders()
                         headers.add(name: "Content-Type", value: self.contentType(for: .json))
                         try? FileManager.default.removeItem(at: tempFileURL)
+                        releaseQueue()
                         return Response(status: .badRequest, headers: headers, body: .init(string: errorBody))
                     }
                     // Timestamp streaming mode
@@ -449,6 +499,7 @@ final class VaporServer {
                                             streamWriter.write(.end, promise: nil)
                                         },
                                         cleanup: {
+                                            releaseQueue()
                                             try? FileManager.default.removeItem(at: tempFileURL)
                                         }
                                     )
@@ -469,6 +520,7 @@ final class VaporServer {
                                         streamWriter.write(.end, promise: nil)
                                     },
                                     cleanup: {
+                                        releaseQueue()
                                         try? FileManager.default.removeItem(at: tempFileURL)
                                     }
                                 )
@@ -529,6 +581,7 @@ final class VaporServer {
                                                 streamWriter.write(.end, promise: nil)
                                             },
                                             cleanup: {
+                                                releaseQueue()
                                                 try? FileManager.default.removeItem(at: tempFileURL)
                                             }
                                         )
@@ -545,14 +598,15 @@ final class VaporServer {
                                             buffer.writeString(str)
                                             streamWriter.write(.buffer(buffer), promise: nil)
                                         },
-                                        end: {
-                                            streamWriter.write(.end, promise: nil)
-                                        },
-                                        cleanup: {
-                                            try? FileManager.default.removeItem(at: tempFileURL)
-                                        }
-                                    )
-                                }
+                                    end: {
+                                        streamWriter.write(.end, promise: nil)
+                                    },
+                                    cleanup: {
+                                        releaseQueue()
+                                        try? FileManager.default.removeItem(at: tempFileURL)
+                                    }
+                                )
+                            }
                             }
                         case .fluid:
                             // Do the work asynchronously, then emit a single chunk
@@ -585,6 +639,7 @@ final class VaporServer {
                                                 streamWriter.write(.end, promise: nil)
                                             },
                                             cleanup: {
+                                                releaseQueue()
                                                 try? FileManager.default.removeItem(at: tempFileURL)
                                             }
                                         )
