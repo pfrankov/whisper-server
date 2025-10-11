@@ -104,6 +104,33 @@ final class VaporServer {
 
     /// Supported providers
     private enum Provider: String { case whisper, fluid }
+    
+    /// Helper to manage progress tracking with automatic cleanup
+    private final class ProgressTracker {
+        private let modelName: String
+        private var finalProgress: Double = 0.0
+        
+        init(modelName: String) {
+            self.modelName = modelName
+            WhisperTranscriptionService.reportTranscriptionProgress(
+                progress: 0.0,
+                isProcessing: true,
+                modelName: modelName
+            )
+        }
+        
+        func markComplete() {
+            finalProgress = 1.0
+        }
+        
+        deinit {
+            WhisperTranscriptionService.reportTranscriptionProgress(
+                progress: finalProgress,
+                isProcessing: false,
+                modelName: modelName
+            )
+        }
+    }
 
     /// REST response model for GET /v1/models
     private struct APIModelListResponse: Content {
@@ -613,19 +640,9 @@ final class VaporServer {
                             Task {
                                 let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
                                 let activeModelName = progressModelName ?? descriptor.displayName
-                                WhisperTranscriptionService.reportTranscriptionProgress(
-                                    progress: 0.0,
-                                    isProcessing: true,
-                                    modelName: activeModelName
-                                )
+                                let progressTracker = ProgressTracker(modelName: activeModelName)
                                 let selectedLanguage = fluidLanguage
-                                var finalProgress: Double = 0.0
                                 defer {
-                                    WhisperTranscriptionService.reportTranscriptionProgress(
-                                        progress: finalProgress,
-                                        isProcessing: false,
-                                        modelName: activeModelName
-                                    )
                                     req.eventLoop.execute {
                                         self.finishStream(
                                             req: req,
@@ -675,7 +692,7 @@ final class VaporServer {
                                     default:
                                         output = trimmed.isEmpty ? "No speech detected\n" : (trimmed + "\n")
                                     }
-                                    finalProgress = 1.0
+                                    progressTracker.markComplete()
 
                                     req.eventLoop.execute {
                                         self.writeChunk(output, req: req, useSSE: useSSE) { buffer in
@@ -704,35 +721,62 @@ final class VaporServer {
                 // Handle subtitle formats that need timestamps
                 switch responseFormat {
                 case .srt, .vtt, .verboseJson:
-                    guard provider == .whisper else {
-                        responseBody = "{\"error\": \"FluidAudio provider supports only json/text formats\"}"
-                        contentType = self.contentType(for: .json)
-                        break
-                    }
-                    if let segments = WhisperTranscriptionService.transcribeAudioWithTimestamps(
-                        at: tempFileURL,
-                        language: whisperReq.language,
-                        prompt: whisperReq.prompt,
-                        modelPaths: modelPaths,
-                        modelName: progressModelName
-                    ) {
-                        switch responseFormat {
-                        case .srt:
-                            responseBody = WhisperTranscriptionService.formatAsSRT(segments: segments)
-                            contentType = self.contentType(for: .srt)
-                        case .vtt:
-                            responseBody = WhisperTranscriptionService.formatAsVTT(segments: segments)
-                            contentType = self.contentType(for: .vtt)
-                        case .verboseJson:
-                            responseBody = WhisperTranscriptionService.formatAsVerboseJSON(segments: segments)
-                            contentType = self.contentType(for: .verboseJson)
-                        default:
-                            responseBody = "{\"error\": \"Unsupported response format\"}"
+                    switch provider {
+                    case .whisper:
+                        if let segments = WhisperTranscriptionService.transcribeAudioWithTimestamps(
+                            at: tempFileURL,
+                            language: whisperReq.language,
+                            prompt: whisperReq.prompt,
+                            modelPaths: modelPaths,
+                            modelName: progressModelName
+                        ) {
+                            switch responseFormat {
+                            case .srt:
+                                responseBody = WhisperTranscriptionService.formatAsSRT(segments: segments)
+                                contentType = self.contentType(for: .srt)
+                            case .vtt:
+                                responseBody = WhisperTranscriptionService.formatAsVTT(segments: segments)
+                                contentType = self.contentType(for: .vtt)
+                            case .verboseJson:
+                                responseBody = WhisperTranscriptionService.formatAsVerboseJSON(segments: segments)
+                                contentType = self.contentType(for: .verboseJson)
+                            default:
+                                responseBody = "{\"error\": \"Unsupported response format\"}"
+                                contentType = self.contentType(for: .json)
+                            }
+                        } else {
+                            responseBody = "{\"error\": \"Failed to transcribe audio with timestamps\"}"
                             contentType = self.contentType(for: .json)
                         }
-                    } else {
-                        responseBody = "{\"error\": \"Failed to transcribe audio with timestamps\"}"
-                        contentType = self.contentType(for: .json)
+                    case .fluid:
+                        let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                        let activeModelName = progressModelName ?? descriptor.displayName
+                        let progressTracker = ProgressTracker(modelName: activeModelName)
+
+                        if let result = await FluidTranscriptionService.transcribeAudio(
+                            at: tempFileURL,
+                            language: fluidLanguage,
+                            model: descriptor
+                        ) {
+                            progressTracker.markComplete()
+                            switch responseFormat {
+                            case .srt:
+                                responseBody = WhisperTranscriptionService.formatAsSRT(segments: result.segments)
+                                contentType = self.contentType(for: .srt)
+                            case .vtt:
+                                responseBody = WhisperTranscriptionService.formatAsVTT(segments: result.segments)
+                                contentType = self.contentType(for: .vtt)
+                            case .verboseJson:
+                                responseBody = WhisperTranscriptionService.formatAsVerboseJSON(segments: result.segments)
+                                contentType = self.contentType(for: .verboseJson)
+                            default:
+                                responseBody = "{\"error\": \"Unsupported response format\"}"
+                                contentType = self.contentType(for: .json)
+                            }
+                        } else {
+                            responseBody = "{\"error\": \"Transcription failed\"}"
+                            contentType = self.contentType(for: .json)
+                        }
                     }
                 case .json, .text:
                     // Handle regular formats (json, text)
@@ -770,28 +814,17 @@ final class VaporServer {
                     case .fluid:
                         let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
                         let activeModelName = progressModelName ?? descriptor.displayName
-                        WhisperTranscriptionService.reportTranscriptionProgress(
-                            progress: 0.0,
-                            isProcessing: true,
-                            modelName: activeModelName
-                        )
-                        var finalProgress: Double = 0.0
-                        defer {
-                            WhisperTranscriptionService.reportTranscriptionProgress(
-                                progress: finalProgress,
-                                isProcessing: false,
-                                modelName: activeModelName
-                            )
-                        }
-                        if let transcription = await FluidTranscriptionService.transcribeText(
+                        let progressTracker = ProgressTracker(modelName: activeModelName)
+                        
+                        if let result = await FluidTranscriptionService.transcribeAudio(
                             at: tempFileURL,
                             language: fluidLanguage,
                             model: descriptor
                         ) {
-                            finalProgress = 1.0
+                            progressTracker.markComplete()
                             switch responseFormat {
                             case .json:
-                                let jsonResponse = ["text": transcription]
+                                let jsonResponse = ["text": result.text]
                                 if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
                                    let jsonString = String(data: jsonData, encoding: .utf8) {
                                     responseBody = jsonString
@@ -801,7 +834,7 @@ final class VaporServer {
                                     contentType = self.contentType(for: .json)
                                 }
                             case .text:
-                                responseBody = transcription
+                                responseBody = result.text
                                 contentType = self.contentType(for: .text)
                             default:
                                 responseBody = "Unsupported response format"

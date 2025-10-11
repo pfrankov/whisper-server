@@ -411,6 +411,14 @@ validate_srt_plain() {
         printf 'SRT body missing hours marker\n' >&2
         return 1
     fi
+    if [[ ! $LAST_BODY =~ [[:alpha:]] ]]; then
+        printf 'SRT body missing readable transcript text\n' >&2
+        return 1
+    fi
+    if [[ $LAST_BODY == *"▁"* ]]; then
+        printf 'SRT body contains unexpected subword markers\n' >&2
+        return 1
+    fi
     return 0
 }
 
@@ -421,6 +429,14 @@ validate_vtt_plain() {
     fi
     if [[ $LAST_BODY != *"-->"* ]]; then
         printf 'VTT body missing timestamp separator\n' >&2
+        return 1
+    fi
+    if [[ ! $LAST_BODY =~ [[:alpha:]] ]]; then
+        printf 'VTT body missing readable transcript text\n' >&2
+        return 1
+    fi
+    if [[ $LAST_BODY == *"▁"* ]]; then
+        printf 'VTT body contains unexpected subword markers\n' >&2
         return 1
     fi
     return 0
@@ -1169,6 +1185,24 @@ run_fluid_suite() {
         -X POST "$SERVER_URL/v1/audio/transcriptions" \
         -F "file=@$TEST_AUDIO" \
         -F "response_format=invalid" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test_with_headers "Fluid SRT format" 200 validate_srt_plain "application/x-subrip" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=srt" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test_with_headers "Fluid VTT format" 200 validate_vtt_plain "text/vtt" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=vtt" \
+        -F "model=$CURRENT_MODEL"
+
+    run_http_test "Fluid Verbose JSON format" 200 validate_verbose_json \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=verbose_json" \
         -F "model=$CURRENT_MODEL"
 
     run_sse_test "Fluid SSE Text" validate_sse_text \
