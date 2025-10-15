@@ -1,62 +1,83 @@
-# WhisperServer MacOS
+# WhisperServer for macOS
 
 <img src="https://github.com/user-attachments/assets/bf882d55-f1f6-4765-9124-e2cb351eabe0" alt="Demo" width="500"/>
 
-_No speedup. MacBook Pro 13, M2, 16GB._
+_No speedup. MacBook Pro 13, M2, 16 GB._
 
-WhisperServer is a macOS application that runs in the background with only a menu bar icon. It provides an HTTP server compatible with the OpenAI Whisper API for audio transcription.
+WhisperServer is a lightweight macOS menu bar app that runs in the background.  
+It exposes a local HTTP server compatible with the OpenAI Whisper API for audio transcription.
 
-<img width="296" alt="image" src="https://github.com/user-attachments/assets/06a74992-fea3-438b-84e9-85aebdfd7247" />
+<img width="506" alt="menu bar demo" src="https://github.com/user-attachments/assets/7470e00a-3bc6-4cd3-ab95-d45606393954" />
 
+## Key features
+- Local HTTP server compatible with the OpenAI Whisper API
+- Menu bar application (no Dock icon)
+- Streaming via Server‑Sent Events (SSE) with automatic chunked fallback
+- Automatic VAD‑based chunking for Whisper models to prevent repeated text on long audio
+- Automatically downloads models on first use
+- Fast, high‑quality quantized models
+- Parakeet model can transcribe ~1 hour of audio in about 1 minute
 
-## Key Features
+## Requirements
+- macOS 14.6 or newer
+- Apple Silicon (ARM64) only
 
-- Works as a menu bar application (no dock icon)
-- Displays a menu bar icon with status information
-- Provides an API compatible with the OpenAI Whisper API
-- Supports the `/v1/audio/transcriptions` endpoint for audio transcription
-- HTTP server on port 12017
-- **Streaming support with Server-Sent Events (SSE) and chunked response fallback**
-- Also returns "OK" in response to any other HTTP request
+## Installation
 
-## How to Use
+### Download from GitHub Releases
+1. Go to the [Releases page](https://github.com/pfrankov/whisper-server/releases).
+2. Download the latest `.dmg` file.
+3. Open the `.dmg` file.
+4. Drag WhisperServer to your Applications folder.
 
-1. Build and run the application in Xcode
-2. Look for the server icon in the menu bar
-3. The HTTP server will automatically start on port 12017
-4. Use the API endpoint for transcription: `http://localhost:12017/v1/audio/transcriptions`
-5. To exit the application, click on the menu bar icon and select "Quit"
+### First launch
+This app is not signed by Apple. To open it the first time:
+1. Control‑click (or right‑click) WhisperServer in Applications.
+2. Choose Open.
+3. In the warning dialog, click Open.
+4. Or go to System Settings → Privacy & Security and allow the app.
 
-## Example of Using the Whisper API
+## Usage
+```bash
+curl -X POST http://localhost:12017/v1/audio/transcriptions \
+  -F file=@/path/to/audio.mp3
+```
 
-For audio transcription:
+### Supported parameters
+| Parameter        | Description                        | Values                              | Required |
+|------------------|------------------------------------|-------------------------------------|----------|
+| file             | Audio file                         | wav, mp3, m4a                       | yes      |
+| model            | Model to use                       | model ID                            | no       |
+| prompt           | Guide style/tone (Whisper)         | string                              | no       |
+| response_format  | Output format                      | json, text, srt, vtt, verbose_json  | no       |
+| language         | Input language (ISO 639‑1)         | 2‑letter code                       | no       |
+| stream           | Enable streaming (SSE or chunked)  | true, false                         | no       |
 
+### Models
+| Model                    | Relative speed | Quality                               | Notes                          |
+|--------------------------|----------------|---------------------------------------|--------------------------------|
+| parakeet-tdt-0.6b-v3     | Fastest        | Medium                                | —                              |
+| tiny-q5_1                | Fast           | Good (English), Low (other languages) | Best for English; very small   |
+| large-v3-turbo-q5_0      | Slow           | Medium–Good                           | Balanced large model           |
+| medium-q5_0              | Slowest        | Good                                  | Higher accuracy; heavier model |
+
+## Response formats
+
+The server supports multiple response formats:
 ```bash
 curl -X POST http://localhost:12017/v1/audio/transcriptions \
   -F file=@/path/to/audio.mp3 \
   -F response_format=json
 ```
 
-Supported parameters:
-- `file` - audio file (required)
-- `prompt` - text to guide the transcription style
-- `response_format` - response format (json, text, srt, vtt, verbose_json)
-- `temperature` - sampling temperature from 0 to 1
-- `language` - input language (ISO-639-1)
-- `stream` - enable streaming response (true/false)
-
-## Response Formats
-
-The server supports the following response formats:
-
-1. **json** (default):
+1. json (default)
 ```json
 {
   "text": "Transcription text."
 }
 ```
 
-2. **verbose_json**:
+2. verbose_json
 ```json
 {
   "task": "transcribe",
@@ -75,127 +96,105 @@ The server supports the following response formats:
       "avg_logprob": -0.45,
       "compression_ratio": 1.275,
       "no_speech_prob": 0.1
-    },
-    // Other segments...
+    }
   ]
 }
 ```
 
-3. **text**: Simple text output
+3. text
+```
+And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.
+```
 
-4. **srt**: SubRip subtitle format
+4. srt
+```
+1
+00:00:00,240 --> 00:00:07,839
+And so, my fellow Americans, ask not what your country can do for you
 
-5. **vtt**: WebVTT subtitle format
+2
+00:00:07,839 --> 00:00:10,640
+ask what you can do for your country.
+```
 
-## Streaming Support
+5. vtt
+```
+WEBVTT
 
-WhisperServer supports real-time streaming transcription with automatic protocol detection:
+00:00:00.240 --> 00:00:07.839
+And so, my fellow Americans, ask not what your country can do for you
 
-### Server-Sent Events (SSE) - Priority
-When the client sends `Accept: text/event-stream` header, the server uses SSE format:
+00:00:07.839 --> 00:00:10.640
+ask what you can do for your country.
+```
+
+## Streaming support
+
+WhisperServer supports real‑time streaming with automatic protocol detection. Note: timestamped streaming (srt, vtt, verbose_json) requires the Whisper provider; the Fluid provider streams text/JSON only.
+
+### Server‑Sent Events (SSE)
+If the client sends the header `Accept: text/event-stream`, the server uses SSE:
 
 ```bash
 curl -X POST http://localhost:12017/v1/audio/transcriptions \
   -H "Accept: text/event-stream" \
   -F file=@audio.wav \
-  -F response_format="text" \
-  -F stream="true" \
+  -F stream=true \
   --no-buffer
 ```
 
 Response format:
 ```
 data: First transcribed segment
-data: 
+data:
 
 data: Second transcribed segment
-data: 
+data:
 
 event: end
-data: 
-
+data:
 ```
 
-### Chunked Response - Fallback
-When SSE is not supported, the server automatically falls back to HTTP chunked transfer encoding:
+### Chunked response
+If SSE isn’t supported, the server falls back to HTTP chunked transfer encoding:
 
 ```bash
 curl -X POST http://localhost:12017/v1/audio/transcriptions \
   -F file=@audio.wav \
-  -F response_format="text" \
-  -F stream="true" \
+  -F stream=true \
   --no-buffer
 ```
 
-### Testing Streaming
-Use the comprehensive test script:
-- `test_api.sh` - Complete API and streaming test suite
+## Tested with
+| Project | Platform | Purpose & Key features |
+|---------|----------|------------------------|
+| [VibeScribe](https://github.com/pfrankov/vibe-scribe) | macOS | Automatic call summarization and transcription for meetings, interviews, and brainstorming. Key features: AI-powered summaries, easy export of notes, transcription. |
 
-## Technical Details
 
-- The application uses the modern Network framework to create an HTTP server
-- The default port value is 12017
-- No window is displayed — the application works completely in the background
-- Optimized code architecture for easy maintenance
 
-## Code Architecture
+## Build from Source
+If you want to build WhisperServer yourself:
 
-The project is divided into the following main components:
-
-- **WhisperServerApp.swift**: SwiftUI application entry point and AppDelegate
-- **SimpleHTTPServer.swift**: HTTP server implementation with Whisper API support
-- **ContentView.swift**: SwiftUI placeholder, not displayed to the user
-- **Info.plist**: Application configuration and network permissions
-
-## Requirements
-
-- macOS 11.0 or newer
-- Xcode 13.0 or newer (for building)
-
-## Troubleshooting
-
-If you have problems connecting to the server:
-
-1. Make sure the application is running (icon in the menu bar)
-2. Check if the firewall is blocking port 12017
-3. Check if there are other applications using port 12017
-4. If the server is not responding, restart the application
-
-For detailed logs, run the application from Xcode and watch the console. 
-
-## Versioning and release
-
-This repository contains a small helper script to bump the app version using Xcode's MARKETING_VERSION and keep Info.plist in sync.
-
-Script: `scripts/bump_version.sh`
-
-Usage:
-
-1) Bump the patch version (increments patch by 1):
-
+1. Clone the repository:
 ```bash
-./scripts/bump_version.sh patch
+git clone https://github.com/pfrankov/whisper-server.git
+cd whisper-server
 ```
 
-2) Bump the minor version (increments minor by 1, resets patch to 0):
+2. Open the project in Xcode.
 
-```bash
-./scripts/bump_version.sh minor
-```
+3. Select your development team:
+   - Click the project in Xcode
+   - Select the WhisperServer target
+  - Go to "Signing & Capabilities"
+  - Choose your team
 
-3) Bump the major version (increments major by 1, resets minor and patch to 0):
+4. Build and run:
+   - Press `Cmd + R` to build and run
+   - Or use the menu: Product → Run
 
-```bash
-./scripts/bump_version.sh major
-```
+### Testing
+- Run the app, then run the script: `test_api.sh` (complete API test suite)
 
-Optional flags:
-- `--build <number>` — set an explicit `CFBundleVersion` (build number).
-- `--tag` — create an annotated git tag named `v<new-version>`.
-- `--push` — push commit (and tag, if `--tag` used) to `origin`.
-
-Notes:
-- The script updates MARKETING_VERSION in `WhisperServer.xcodeproj/project.pbxproj` and ensures `WhisperServer/Info.plist` uses `$(MARKETING_VERSION)` for `CFBundleShortVersionString`. It also updates `CFBundleVersion` (build number).
-- After running the script, review changes and commit them (for example `git add WhisperServer.xcodeproj/project.pbxproj WhisperServer/Info.plist && git commit -m "Bump version to X.Y.Z"`).
-- `--tag` will create an annotated tag named `v<version>` on the current HEAD — make sure you've committed first.
-- `--push` will push the tag (if used with `--tag`) or push the current branch if used alone.
+## License
+MIT
