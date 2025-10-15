@@ -13,7 +13,7 @@ It exposes a local HTTP server compatible with the OpenAI Whisper API for audio 
 - Local HTTP server compatible with the OpenAI Whisper API
 - Menu bar application (no Dock icon)
 - Streaming via Server‑Sent Events (SSE) with automatic chunked fallback
-- Automatic VAD‑based chunking for Whisper models to prevent repeated text on long audio
+- Automatic VAD-based chunking for Whisper models to prevent repeated text in long audio files — a common issue with standard whisper.cpp
 - Automatically downloads models on first use
 - Fast, high‑quality quantized models
 - Parakeet model can transcribe ~1 hour of audio in about 1 minute
@@ -21,6 +21,11 @@ It exposes a local HTTP server compatible with the OpenAI Whisper API for audio 
 ## Requirements
 - macOS 14.6 or newer
 - Apple Silicon (ARM64) only
+
+## Recommended by
+| Project | Platform | Key features |
+|---------|----------|------------------------|
+| [VibeScribe](https://github.com/pfrankov/vibe-scribe) | macOS | Automatic call summarization and transcription for meetings, interviews, and brainstorming. Key features: AI-powered summaries, easy export of notes, transcription. |
 
 ## Installation
 
@@ -30,7 +35,7 @@ It exposes a local HTTP server compatible with the OpenAI Whisper API for audio 
 3. Open the `.dmg` file.
 4. Drag WhisperServer to your Applications folder.
 
-### First launch
+### 🚨 First launch
 This app is not signed by Apple. To open it the first time:
 1. Control‑click (or right‑click) WhisperServer in Applications.
 2. Choose Open.
@@ -54,12 +59,12 @@ curl -X POST http://localhost:12017/v1/audio/transcriptions \
 | stream           | Enable streaming (SSE or chunked)  | true, false                         | no       |
 
 ### Models
-| Model                    | Relative speed | Quality                               | Notes                          |
-|--------------------------|----------------|---------------------------------------|--------------------------------|
-| parakeet-tdt-0.6b-v3     | Fastest        | Medium                                | —                              |
-| tiny-q5_1                | Fast           | Good (English), Low (other languages) | Best for English; very small   |
-| large-v3-turbo-q5_0      | Slow           | Medium–Good                           | Balanced large model           |
-| medium-q5_0              | Slowest        | Good                                  | Higher accuracy; heavier model |
+| Model | Relative speed | Quality |
+|--------------------------|----------------|---------------------------------------|
+| `parakeet-tdt-0.6b-v3`   | Fastest        | Medium                                |
+| `tiny-q5_1`              | Fast           | Good (English), Low (other languages) |
+| `large-v3-turbo-q5_0`    | Slow           | Medium–Good                           |
+| `medium-q5_0`            | Slowest        | Good                                  |
 
 ## Response formats
 
@@ -164,13 +169,6 @@ curl -X POST http://localhost:12017/v1/audio/transcriptions \
   -F stream=true \
   --no-buffer
 ```
-
-## Tested with
-| Project | Platform | Purpose & Key features |
-|---------|----------|------------------------|
-| [VibeScribe](https://github.com/pfrankov/vibe-scribe) | macOS | Automatic call summarization and transcription for meetings, interviews, and brainstorming. Key features: AI-powered summaries, easy export of notes, transcription. |
-
-
 
 ## Build from Source
 If you want to build WhisperServer yourself:
