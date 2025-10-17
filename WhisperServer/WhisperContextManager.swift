@@ -10,11 +10,16 @@ class WhisperContextManager {
     /// Shared context and lock for thread-safe access
     private static var sharedContext: OpaquePointer?
     private static let lock = NSLock()
-    
+    private static let logQueue = DispatchQueue(label: "com.whisperserver.whisper.log", qos: .utility)
+    private static var isLoggingConfigured = false
+
     /// Timeout mechanism for releasing resources after inactivity
     private static var inactivityTimer: Timer?
     private static var lastActivityTime = Date()
     private static var inactivityTimeout: TimeInterval = 30.0 // Default 30 seconds
+    private static let logCallback: ggml_log_callback = { level, messagePtr, _ in
+        WhisperContextManager.handleLog(level: level, messagePtr: messagePtr)
+    }
     
     // MARK: - Context Management
     
@@ -167,6 +172,8 @@ class WhisperContextManager {
             return nil
         }
 
+        configureLoggingIfNeeded()
+
         return isolatedContext
     }
     
@@ -239,6 +246,7 @@ class WhisperContextManager {
         }
 
         sharedContext = newContext
+        configureLoggingIfNeeded()
         
         // Send notification that Metal is active
         DispatchQueue.main.async {
@@ -256,7 +264,7 @@ class WhisperContextManager {
     /// Extracts model name from URL path for better logging
     private static func extractModelNameFromPath(_ path: URL?) -> String? {
         guard let path = path else { return nil }
-        
+
         let filename = path.lastPathComponent
         let modelPatterns = ["tiny", "base", "small", "medium", "large"]
         
@@ -268,4 +276,34 @@ class WhisperContextManager {
         
         return (filename as NSString).deletingPathExtension
     }
-} 
+
+    private static func configureLoggingIfNeeded() {
+        guard !isLoggingConfigured else { return }
+        whisper_log_set(logCallback, nil)
+        isLoggingConfigured = true
+    }
+
+    private static func handleLog(level: ggml_log_level, messagePtr: UnsafePointer<CChar>?) {
+        guard let messagePtr else { return }
+        let rawMessage = String(cString: messagePtr)
+        let message = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return }
+
+        let prefix: String
+        switch level.rawValue {
+        case GGML_LOG_LEVEL_ERROR.rawValue:
+            prefix = "❌"
+        case GGML_LOG_LEVEL_WARN.rawValue:
+            prefix = "⚠️"
+        case GGML_LOG_LEVEL_INFO.rawValue:
+            prefix = "ℹ️"
+        default:
+            prefix = "➖"
+        }
+
+        logQueue.async {
+            print("\(prefix) whisper.cpp: \(message)")
+        }
+    }
+
+}

@@ -15,6 +15,7 @@ final class MenuBarService: ObservableObject {
     private enum MenuItemTags: Int {
         case status = 1000
         case server = 1001
+        case download = 1002
     }
     
     // MARK: - Properties
@@ -29,7 +30,6 @@ final class MenuBarService: ObservableObject {
     private var baseTooltip = "WhisperServer - Ready"
     private var isCurrentlyProcessing = false
     private let progressResetDelay: TimeInterval = 1.0
-    
     // MARK: - Initialization
     
     init(modelManager: ModelManager) {
@@ -40,6 +40,9 @@ final class MenuBarService: ObservableObject {
     
     func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+#if DEBUG
+        print("🔧 DEBUG build detected: Reset menu item enabled.")
+#endif
         
         configureStatusButton()
         createMenu()
@@ -115,23 +118,27 @@ final class MenuBarService: ObservableObject {
         guard let menu = statusItem?.menu else { return }
 
         DispatchQueue.main.async {
-            let progressIndex = menu.items.firstIndex { $0.title.hasPrefix("Download:") } ?? -1
-            let progressPercent = Int(progress * 100)
-            
-            if progressIndex >= 0 {
-                menu.items[progressIndex].title = "Download: \(progressPercent)%"
-            } else if progress > 0 {
-                let insertIndex = menu.items.firstIndex { $0.isSeparatorItem } ?? 0
-                let progressItem = NSMenuItem(title: "Download: \(progressPercent)%", action: nil, keyEquivalent: "")
-                menu.insertItem(progressItem, at: insertIndex)
-            }
-            
-            if progress >= 1.0, progressIndex >= 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    if menu.items.indices.contains(progressIndex) {
-                        menu.removeItem(at: progressIndex)
-                    }
+            let clampedProgress = max(0.0, min(1.0, progress))
+            let progressPercent = Int((clampedProgress * 100).rounded())
+            let progressItem = self.ensureDownloadMenuItem(in: menu)
+            progressItem.title = "Download: \(progressPercent)%"
+            progressItem.isEnabled = false
+
+            if clampedProgress >= 1.0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.hideDownloadProgress()
                 }
+            }
+        }
+    }
+
+    func hideDownloadProgress() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  let menu = self.statusItem?.menu else { return }
+            let index = menu.indexOfItem(withTag: MenuItemTags.download.rawValue)
+            if index >= 0 {
+                menu.removeItem(at: index)
             }
         }
     }
@@ -200,6 +207,13 @@ final class MenuBarService: ObservableObject {
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
+#if DEBUG
+        let resetItem = NSMenuItem(title: "Reset Application Data", action: #selector(resetApplicationData(_:)), keyEquivalent: "")
+        resetItem.target = self
+        resetItem.toolTip = "Remove all saved preferences and cached models"
+        menu.addItem(resetItem)
+        print("🔧 Menu items:", menu.items.map { $0.title })
+#endif
         
         statusItem?.menu = menu
     }
@@ -207,33 +221,8 @@ final class MenuBarService: ObservableObject {
     private func createModelSelectionMenu(_ parentMenu: NSMenu) {
         let modelSelectionMenuItem = NSMenuItem(title: "Select Model", action: nil, keyEquivalent: "")
         let modelSelectionSubmenu = NSMenu()
-        
-        // FluidAudio provider entry
-        let fluidItem = NSMenuItem(title: "FluidAudio (Core ML)", action: #selector(selectFluidProvider), keyEquivalent: "")
-        fluidItem.target = self
-        fluidItem.state = (modelManager.selectedProvider == .fluid) ? .on : .off
-        modelSelectionSubmenu.addItem(fluidItem)
-        modelSelectionSubmenu.addItem(NSMenuItem.separator())
-        
-        // Whisper models
-        if modelManager.availableModels.isEmpty {
-            let noModelsItem = NSMenuItem(title: "No models available", action: nil, keyEquivalent: "")
-            noModelsItem.isEnabled = false
-            modelSelectionSubmenu.addItem(noModelsItem)
-        } else {
-            for model in modelManager.availableModels {
-                let modelItem = NSMenuItem(title: model.name, action: #selector(selectModel(_:)), keyEquivalent: "")
-                modelItem.target = self
-                modelItem.representedObject = model.id
-                
-                if modelManager.selectedProvider == .whisper && model.id == modelManager.selectedModelID {
-                    modelItem.state = .on
-                }
-                
-                modelSelectionSubmenu.addItem(modelItem)
-            }
-        }
-        
+        populateModelSelectionSubmenu(modelSelectionSubmenu)
+
         modelSelectionMenuItem.submenu = modelSelectionSubmenu
         parentMenu.addItem(modelSelectionMenuItem)
     }
@@ -256,6 +245,20 @@ final class MenuBarService: ObservableObject {
         progressItem.toolTip = "Current transcription progress"
         progressItem.tag = MenuItemTags.status.rawValue
         menu.insertItem(progressItem, at: 0)
+        return progressItem
+    }
+
+    private func ensureDownloadMenuItem(in menu: NSMenu) -> NSMenuItem {
+        if let existingItem = menu.item(withTag: MenuItemTags.download.rawValue) {
+            return existingItem
+        }
+
+        let insertIndex = menu.items.firstIndex { $0.isSeparatorItem } ?? menu.items.count
+        let progressItem = NSMenuItem(title: "Download: 0%", action: nil, keyEquivalent: "")
+        progressItem.isEnabled = false
+        progressItem.toolTip = "Current model download progress"
+        progressItem.tag = MenuItemTags.download.rawValue
+        menu.insertItem(progressItem, at: insertIndex)
         return progressItem
     }
 
@@ -303,6 +306,63 @@ final class MenuBarService: ObservableObject {
         statusItem?.button?.toolTip = tooltip
     }
     
+    private func populateModelSelectionSubmenu(_ submenu: NSMenu) {
+        submenu.removeAllItems()
+
+        #if DEBUG
+        print("🔧 populateModelSelectionSubmenu provider:", modelManager.selectedProvider)
+        #endif
+        let fluidItem = NSMenuItem(title: "FluidAudio (Core ML)", action: #selector(selectFluidProvider), keyEquivalent: "")
+        fluidItem.target = self
+        fluidItem.state = (modelManager.selectedProvider == .fluid) ? .on : .off
+        submenu.addItem(fluidItem)
+        submenu.addItem(NSMenuItem.separator())
+
+        if modelManager.availableModels.isEmpty {
+            let noModelsItem = NSMenuItem(title: "No models available", action: nil, keyEquivalent: "")
+            noModelsItem.isEnabled = false
+            submenu.addItem(noModelsItem)
+        } else {
+            for model in modelManager.availableModels {
+                addModelMenuItems(for: model, to: submenu)
+            }
+        }
+
+        submenu.addItem(NSMenuItem.separator())
+        let importItem = NSMenuItem(title: "Import Whisper Model…", action: #selector(importWhisperModel), keyEquivalent: "")
+        importItem.target = self
+        submenu.addItem(importItem)
+    }
+
+    private func addModelMenuItems(for model: Model, to submenu: NSMenu) {
+        let modelItem = NSMenuItem(title: model.name, action: #selector(selectModel(_:)), keyEquivalent: "")
+        modelItem.target = self
+        modelItem.representedObject = model.id
+        if modelManager.selectedProvider == .whisper && model.id == modelManager.selectedModelID {
+            modelItem.state = .on
+        }
+
+        if model.id.hasPrefix("user-") {
+            modelItem.toolTip = "Hold Option (⌥) to delete"
+        }
+
+        submenu.addItem(modelItem)
+
+        guard model.id.hasPrefix("user-") else { return }
+
+        let deleteTitle = "Delete \(model.name)…"
+        let deleteItem = NSMenuItem(title: deleteTitle, action: #selector(confirmDeleteModel(_:)), keyEquivalent: "")
+        deleteItem.target = self
+        deleteItem.representedObject = model.id
+        deleteItem.isAlternate = true
+        deleteItem.keyEquivalentModifierMask = [.option]
+        deleteItem.toolTip = "Remove this model and its cached files"
+        if #available(macOS 11.0, *) {
+            deleteItem.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete model")
+        }
+        submenu.addItem(deleteItem)
+    }
+
     private func setupNotificationObservers() {
         NotificationCenter.default.addObserver(
             self, 
@@ -314,6 +374,37 @@ final class MenuBarService: ObservableObject {
     
     // MARK: - Menu Actions
     
+#if DEBUG
+    @objc private func resetApplicationData(_ sender: NSMenuItem) {
+        let alert = NSAlert()
+        alert.messageText = "Reset Application Data?"
+        alert.informativeText = "All downloaded models, cached assets, and saved preferences will be removed. The app will behave like a fresh install."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        serverCoordinator?.stopServer()
+        WhisperTranscriptionService.cleanup()
+
+        defer {
+            serverCoordinator?.startServer()
+        }
+
+        do {
+            try modelManager.resetAllData()
+        } catch {
+            let errorAlert = NSAlert()
+            errorAlert.messageText = "Unable to reset data"
+            errorAlert.informativeText = error.localizedDescription
+            errorAlert.alertStyle = .warning
+            errorAlert.addButton(withTitle: "OK")
+            errorAlert.runModal()
+        }
+    }
+#endif
+
     @objc private func selectModel(_ sender: NSMenuItem) {
         guard let modelId = sender.representedObject as? String else { return }
         
@@ -341,42 +432,83 @@ final class MenuBarService: ObservableObject {
     @objc private func refreshModelSelectionMenu() {
         guard let menu = statusItem?.menu else { return }
         
-        for i in 0..<menu.items.count {
-            let item = menu.items[i]
-            if item.title == "Select Model", let submenu = item.submenu {
-                submenu.removeAllItems()
-                
-                // FluidAudio entry
-                let fluidItem = NSMenuItem(title: "FluidAudio (Core ML)", action: #selector(selectFluidProvider), keyEquivalent: "")
-                fluidItem.target = self
-                fluidItem.state = (modelManager.selectedProvider == .fluid) ? .on : .off
-                submenu.addItem(fluidItem)
-                submenu.addItem(NSMenuItem.separator())
-                
-                // Whisper models
-                if modelManager.availableModels.isEmpty {
-                    let noModelsItem = NSMenuItem(title: "No models available", action: nil, keyEquivalent: "")
-                    noModelsItem.isEnabled = false
-                    submenu.addItem(noModelsItem)
-                } else {
-                    for model in modelManager.availableModels {
-                        let modelItem = NSMenuItem(title: model.name, action: #selector(selectModel(_:)), keyEquivalent: "")
-                        modelItem.target = self
-                        modelItem.representedObject = model.id
-                        
-                        if modelManager.selectedProvider == .whisper && model.id == modelManager.selectedModelID {
-                            modelItem.state = .on
-                        }
-                        
-                        submenu.addItem(modelItem)
-                    }
-                }
-                break
-            }
+        for item in menu.items {
+            guard item.title == "Select Model", let submenu = item.submenu else { continue }
+            populateModelSelectionSubmenu(submenu)
+            break
+        }
+    }
+
+    @objc private func importWhisperModel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedFileTypes = ["bin", "zip", "mlmodelc"]
+        panel.treatsFilePackagesAsDirectories = false
+        panel.title = "Import Whisper Model"
+        panel.message = "Select a Whisper .bin model file and optionally its .mlmodelc bundle."
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = panel.runModal()
+        guard response == .OK else { return }
+
+        let urls = panel.urls
+        guard !urls.isEmpty else { return }
+
+        guard urls.contains(where: { $0.pathExtension.lowercased() == "bin" }) else {
+            let alert = NSAlert()
+            alert.messageText = "Whisper model import failed"
+            alert.informativeText = "Please select at least one .bin model file."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        serverCoordinator?.stopServer()
+        defer { serverCoordinator?.restartServer() }
+
+        do {
+            let model = try modelManager.importUserModel(from: urls)
+            print("📥 Imported user model: \(model.name) [\(model.id)]")
+            refreshModelSelectionMenu()
+        } catch {
+            print("❌ Failed to import model: \(error.localizedDescription)")
+        }
+    }
+    
+    @objc private func confirmDeleteModel(_ sender: NSMenuItem) {
+        guard let modelId = sender.representedObject as? String,
+              let model = modelManager.availableModels.first(where: { $0.id == modelId }) else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Delete \"\(model.name)\"?"
+        alert.informativeText = "This removes the model and its associated Core ML bundles."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        serverCoordinator?.stopServer()
+        defer { serverCoordinator?.restartServer() }
+
+        do {
+            try modelManager.deleteUserModel(id: modelId)
+            refreshModelSelectionMenu()
+        } catch {
+            let errorAlert = NSAlert()
+            errorAlert.messageText = "Unable to delete model"
+            errorAlert.informativeText = error.localizedDescription
+            errorAlert.alertStyle = .warning
+            errorAlert.addButton(withTitle: "OK")
+            errorAlert.runModal()
         }
     }
     
     @objc private func quitApp() {
         NSApp.terminate(self)
     }
+
 }

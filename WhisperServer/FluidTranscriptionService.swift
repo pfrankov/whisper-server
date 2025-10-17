@@ -81,6 +81,17 @@ struct FluidTranscriptionService {
         availableModelsInternal.map { $0.id }
     }
 
+    static func cacheDirectory(for version: AsrModelVersion = .v3) -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let bundleID = Bundle.main.bundleIdentifier ?? "WhisperServer"
+        let base = appSupport
+            .appendingPathComponent(bundleID, isDirectory: true)
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent("FluidAudio", isDirectory: true)
+        let defaultLeaf = AsrModels.defaultCacheDirectory(for: version).lastPathComponent
+        return base.appendingPathComponent(defaultLeaf, isDirectory: true)
+    }
+
     // MARK: - Public API
 
     /// Transcribe a file to plain text using FluidAudio (non-streaming)
@@ -95,7 +106,7 @@ struct FluidTranscriptionService {
     ) async -> String? {
         // TODO: Apply model selection when FluidAudio API supports it
         do {
-            let models = try await AsrModels.downloadAndLoad()
+            let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
             let asrManager = AsrManager(config: .default)
             try await asrManager.initialize(models: models)
 
@@ -123,7 +134,7 @@ struct FluidTranscriptionService {
         // TODO: Apply model selection when FluidAudio API supports it
         // Currently AsrModels.downloadAndLoad() uses the default model without allowing selection
         do {
-            let models = try await AsrModels.downloadAndLoad()
+            let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
             let asrManager = AsrManager(config: .default)
             try await asrManager.initialize(models: models)
 
@@ -355,5 +366,15 @@ struct FluidTranscriptionService {
             result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return result
+    }
+
+    private static func prepareCacheDirectory(version: AsrModelVersion = .v3) -> URL {
+        let directory = cacheDirectory(for: version)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+        } catch {
+            print("⚠️ Failed to create FluidAudio cache directory: \(error)")
+        }
+        return directory
     }
 }

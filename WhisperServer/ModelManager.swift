@@ -7,7 +7,7 @@ import FluidAudio
 struct ModelFile: Codable, Hashable {
     let filename: String
     let url: String
-    let type: String // "bin" or "zip"
+    let type: String // "bin", "zip", or "mlmodelc"
 }
 
 struct Model: Codable, Identifiable, Hashable {
@@ -44,6 +44,39 @@ final class ModelManager: @unchecked Sendable {
         }
     }
 
+    enum ModelDeletionError: LocalizedError {
+        case userModelsDirectoryUnavailable
+        case modelNotFound(String)
+        case notAUserModel
+        case fileRemovalFailed(path: String, underlying: Error)
+
+        var errorDescription: String? {
+            switch self {
+            case .userModelsDirectoryUnavailable:
+                return "User models directory is unavailable"
+            case .modelNotFound(let identifier):
+                return "Model with identifier '\(identifier)' was not found"
+            case .notAUserModel:
+                return "Only user-imported models can be deleted"
+            case .fileRemovalFailed(let path, let underlying):
+                return "Failed to remove item at \(path): \(underlying.localizedDescription)"
+            }
+        }
+    }
+
+#if DEBUG
+    enum ResetError: LocalizedError {
+        case directoryRemovalFailed(path: String, underlying: Error)
+
+        var errorDescription: String? {
+            switch self {
+            case .directoryRemovalFailed(let path, let underlying):
+                return "Failed to remove \(path): \(underlying.localizedDescription)"
+            }
+        }
+    }
+#endif
+
     @Published private(set) var availableModels: [Model] = []
     @Published private(set) var selectedModelID: String? {
         didSet {
@@ -78,14 +111,17 @@ final class ModelManager: @unchecked Sendable {
     
     /// Flags to prevent duplicate preparation per provider
     private var isPreparingWhisperModel: Bool = false
-    private var isPreparingFluidModels: Bool = false
+    private var isPreparingFluidModel: Bool = false
 
     private let fileManager = FileManager.default
     private var modelsDirectory: URL?
+    private var userModelsDirectory: URL?
     private var currentDownloadTasks: [URLSessionDownloadTask] = []
     private var urlSession: URLSession!
     private var progressObservation: NSKeyValueObservation?
     private var suppressAutoPrepare: Bool = false
+    private var whisperPreparationTask: Task<Void, Never>?
+    private var fluidPreparationTask: Task<Void, Never>?
 
     // MARK: - Initialization
 
@@ -124,6 +160,74 @@ final class ModelManager: @unchecked Sendable {
         selectedProvider = provider
     }
 
+#if DEBUG
+    /// Removes all cached data and resets model selections to their defaults (debug builds only).
+    func resetAllData() throws {
+        // Cancel any active downloads
+        currentDownloadTasks.forEach { $0.cancel() }
+        currentDownloadTasks.removeAll()
+        progressObservation?.invalidate()
+        progressObservation = nil
+        whisperPreparationTask?.cancel()
+        whisperPreparationTask = nil
+        fluidPreparationTask?.cancel()
+        fluidPreparationTask = nil
+
+        isPreparingWhisperModel = false
+        isPreparingFluidModel = false
+
+        // Reset user defaults
+        if let bundleID = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: bundleID)
+        } else {
+            UserDefaults.standard.removeObject(forKey: "selectedModelID")
+            UserDefaults.standard.removeObject(forKey: "selectedProvider")
+        }
+        UserDefaults.standard.synchronize()
+
+        downloadProgress = nil
+        isModelReady = false
+        currentStatus = "Resetting application data..."
+
+        suppressAutoPrepare = true
+        selectedModelID = nil
+        selectedProvider = .whisper
+        suppressAutoPrepare = false
+
+        // Remove cached data directories
+        var directoriesToRemove: [URL] = []
+        if let baseModelsDir = modelsDirectory?.deletingLastPathComponent() {
+            directoriesToRemove.append(baseModelsDir)
+        } else if let modelsDir = modelsDirectory {
+            directoriesToRemove.append(modelsDir)
+        }
+        let fluidDir = FluidTranscriptionService.cacheDirectory()
+        directoriesToRemove.append(fluidDir)
+
+        for directory in Set(directoriesToRemove) {
+            if fileManager.fileExists(atPath: directory.path) {
+                do {
+                    try fileManager.removeItem(at: directory)
+                } catch {
+                    throw ResetError.directoryRemovalFailed(path: directory.path, underlying: error)
+                }
+            }
+        }
+
+        // Recreate directories and reload bundled models
+        setupModelsDirectory()
+        loadModelDefinitions()
+
+        suppressAutoPrepare = true
+        selectedProvider = .whisper
+        selectedModelID = availableModels.first?.id
+        suppressAutoPrepare = false
+
+        NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
+        checkAndPrepareSelectedModel()
+    }
+#endif
+
     // MARK: - Private Setup & Loading
 
     private func setupModelsDirectory() {
@@ -143,6 +247,17 @@ final class ModelManager: @unchecked Sendable {
             currentStatus = "Error: Cannot create models directory"
             self.modelsDirectory = nil // Prevent further operations if directory failed
         }
+
+        // Ensure user models subdirectory exists
+        let userDir = modelsDirectory.appendingPathComponent("User")
+        do {
+            try fileManager.createDirectory(at: userDir, withIntermediateDirectories: true, attributes: nil)
+            userModelsDirectory = userDir
+        } catch {
+            // If we fail to create user directory, we can still operate without it
+            userModelsDirectory = nil
+        }
+
     }
 
     private func loadModelDefinitions() {
@@ -159,34 +274,283 @@ final class ModelManager: @unchecked Sendable {
             currentStatus = "Error: Invalid Models.json"
             availableModels = []
         }
+
+        // Merge user models from disk (if any)
+        loadUserModelsFromDisk()
+    }
+
+    private func encoderArtifactBaseName(for name: String) -> String? {
+        var trimmed = name
+        // Remove common extensions in sequence
+        if trimmed.hasSuffix(".zip") {
+            trimmed = (trimmed as NSString).deletingPathExtension
+        }
+        if trimmed.hasSuffix(".mlmodelc") {
+            trimmed = (trimmed as NSString).deletingPathExtension
+        }
+        let suffix = "-encoder"
+        guard trimmed.hasSuffix(suffix) else { return nil }
+        return String(trimmed.dropLast(suffix.count))
+    }
+
+    // MARK: - User Models
+
+    /// Scans the user models directory for locally added Whisper models and merges them into the catalog.
+    private func loadUserModelsFromDisk() {
+        guard let userDir = userModelsDirectory else { return }
+
+        // Find top-level artifacts in user directory
+        let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .nameKey]
+        let directoryContents = (try? fileManager.contentsOfDirectory(
+            at: userDir,
+            includingPropertiesForKeys: resourceKeys,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        var binFiles: [String: URL] = [:]
+        var mlmodelcDirs: [String: URL] = [:]
+
+        for item in directoryContents {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: item.path, isDirectory: &isDir) else { continue }
+
+            if isDir.boolValue {
+                if item.pathExtension.lowercased() == "mlmodelc",
+                   let base = encoderArtifactBaseName(for: item.lastPathComponent) {
+                    mlmodelcDirs[base] = item
+                }
+                continue
+            }
+
+            if item.pathExtension.lowercased() == "bin" {
+                let base = (item.lastPathComponent as NSString).deletingPathExtension
+                binFiles[base] = item
+            }
+        }
+
+        var discovered: [Model] = []
+        for (base, binURL) in binFiles {
+            var files: [ModelFile] = [ModelFile(filename: binURL.lastPathComponent, url: "local", type: "bin")]
+            if let mlDir = mlmodelcDirs[base] {
+                files.append(ModelFile(filename: mlDir.lastPathComponent, url: "local", type: "mlmodelc"))
+            }
+            let modelID = "user-\(base)"
+            let model = Model(id: modelID, name: base, files: files)
+            discovered.append(model)
+        }
+
+        if !discovered.isEmpty {
+            let existingIDs = Set(availableModels.map { $0.id })
+            let newOnes = discovered.filter { !existingIDs.contains($0.id) }
+            if !newOnes.isEmpty {
+                availableModels.append(contentsOf: newOnes)
+            }
+        }
+    }
+
+    /// Imports a user-provided Whisper model file(s) into the user models directory and returns the created catalog entry.
+    /// Accepts a .bin file and optionally additional files (e.g., .zip). Only the .bin is required.
+    @discardableResult
+    func importUserModel(from urls: [URL]) throws -> Model {
+        guard let userDir = userModelsDirectory else {
+            throw NSError(domain: "ModelManager", code: 100, userInfo: [NSLocalizedDescriptionKey: "User models directory unavailable"])
+        }
+
+        // Identify the primary .bin file
+        guard let binURL = urls.first(where: { $0.pathExtension.lowercased() == "bin" }) else {
+            throw NSError(domain: "ModelManager", code: 101, userInfo: [NSLocalizedDescriptionKey: "No .bin file selected"])
+        }
+
+        let baseName = (binURL.lastPathComponent as NSString).deletingPathExtension
+        let newBinName = binURL.lastPathComponent
+        let destBinURL = userDir.appendingPathComponent(newBinName)
+
+        // Copy .bin file
+        if fileManager.fileExists(atPath: destBinURL.path) {
+            // Overwrite existing file with same name
+            try fileManager.removeItem(at: destBinURL)
+        }
+        try fileManager.copyItem(at: binURL, to: destBinURL)
+
+        // Prepare model files list
+        var files: [ModelFile] = [ModelFile(filename: newBinName, url: "local", type: "bin")]
+
+        // Optionally copy a Core ML bundle (.mlmodelc directory)
+        if let mlmodelcURL = urls.first(where: { url in
+            let ext = url.pathExtension.lowercased()
+            if ext == "mlmodelc" { return true }
+            var isDir: ObjCBool = false
+            return fileManager.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue && url.lastPathComponent.lowercased().hasSuffix(".mlmodelc")
+        }),
+           let artifactBase = encoderArtifactBaseName(for: mlmodelcURL.lastPathComponent),
+           artifactBase == baseName {
+            let destMLURL = userDir.appendingPathComponent(mlmodelcURL.lastPathComponent)
+            if fileManager.fileExists(atPath: destMLURL.path) {
+                try? fileManager.removeItem(at: destMLURL)
+            }
+            try fileManager.copyItem(at: mlmodelcURL, to: destMLURL)
+            files.append(ModelFile(filename: mlmodelcURL.lastPathComponent, url: "local", type: "mlmodelc"))
+        }
+
+        // Optionally copy a .zip (e.g., encoder assets) if provided
+        if let zipURL = urls.first(where: { $0.pathExtension.lowercased() == "zip" }),
+           let artifactBase = encoderArtifactBaseName(for: zipURL.lastPathComponent),
+           artifactBase == baseName {
+            let destZipURL = userDir.appendingPathComponent(zipURL.lastPathComponent)
+            if fileManager.fileExists(atPath: destZipURL.path) {
+                try? fileManager.removeItem(at: destZipURL)
+            }
+            try? fileManager.copyItem(at: zipURL, to: destZipURL)
+            files.append(ModelFile(filename: zipURL.lastPathComponent, url: "local", type: "zip"))
+        }
+
+        // Create model entry and add to catalog
+        let modelID = "user-\(baseName)"
+        let modelName = baseName
+        let model = Model(id: modelID, name: modelName, files: files)
+
+        // Merge into available models (avoid duplicates by id)
+        if !availableModels.contains(where: { $0.id == model.id }) {
+            availableModels.append(model)
+        }
+
+        // Select newly imported model for immediate use
+        suppressAutoPrepare = true
+        selectedProvider = .whisper
+        selectedModelID = model.id
+        suppressAutoPrepare = false
+        checkAndPrepareSelectedModel()
+
+        // Persist selection; catalog persistence is implicit by scanning user dir on launch
+        return model
+    }
+
+    func deleteUserModel(id: String) throws {
+        guard id.hasPrefix("user-") else {
+            throw ModelDeletionError.notAUserModel
+        }
+
+        guard let index = availableModels.firstIndex(where: { $0.id == id }) else {
+            throw ModelDeletionError.modelNotFound(id)
+        }
+
+        guard let userDir = userModelsDirectory else {
+            throw ModelDeletionError.userModelsDirectoryUnavailable
+        }
+
+        let model = availableModels[index]
+        let otherModels = availableModels.enumerated().filter { $0.offset != index }.map { $0.element }
+
+        let removedModelWasSelected = (selectedModelID == model.id)
+
+        let isShared: (ModelFile) -> Bool = { file in
+            otherModels.contains { other in
+                other.files.contains { candidate in
+                    candidate.filename == file.filename && candidate.type == file.type
+                }
+            }
+        }
+
+        let removeIfExists: (URL) throws -> Void = { url in
+            if self.fileManager.fileExists(atPath: url.path) {
+                do {
+                    try self.fileManager.removeItem(at: url)
+                } catch {
+                    throw ModelDeletionError.fileRemovalFailed(path: url.path, underlying: error)
+                }
+            }
+        }
+
+        for fileInfo in model.files {
+            try removeIfExists(userDir.appendingPathComponent(fileInfo.filename))
+
+            if fileInfo.type == "zip" {
+                let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
+                try removeIfExists(userDir.appendingPathComponent(unzippedName))
+            }
+
+            guard let modelsDir = modelsDirectory, !isShared(fileInfo) else { continue }
+
+            try removeIfExists(modelsDir.appendingPathComponent(fileInfo.filename))
+
+            if fileInfo.type == "zip" {
+                let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
+                try removeIfExists(modelsDir.appendingPathComponent(unzippedName))
+            }
+        }
+
+        availableModels.remove(at: index)
+
+        if removedModelWasSelected {
+            suppressAutoPrepare = true
+
+            if let fallback = availableModels.first(where: { !$0.id.hasPrefix("user-") }) ?? availableModels.first {
+                selectedModelID = fallback.id
+            } else {
+                selectedModelID = nil
+                isModelReady = false
+                currentStatus = "No model selected"
+            }
+
+            suppressAutoPrepare = false
+        }
+
+        NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
+
+        if removedModelWasSelected, selectedModelID != nil {
+            checkAndPrepareSelectedModel()
+        }
     }
 
     // MARK: - Model Preparation (Checking & Downloading) - To be implemented
 
     func checkAndPrepareSelectedModel() {
         if selectedProvider == .fluid {
-            if isPreparingFluidModels { return }
-            isPreparingFluidModels = true
+            whisperPreparationTask?.cancel()
+            whisperPreparationTask = nil
+            fluidPreparationTask?.cancel()
+
+            if isPreparingFluidModel { return }
+            isPreparingFluidModel = true
             isModelReady = false
-            currentStatus = "Preparing FluidAudio models..."
+            currentStatus = "Preparing FluidAudio model..."
             downloadProgress = nil
 
-            Task { [weak self] in
+            fluidPreparationTask = Task { [weak self] in
                 guard let self = self else { return }
                 do {
-                    _ = try await AsrModels.downloadAndLoad()
-                    DispatchQueue.main.async {
-                        self.currentStatus = "FluidAudio models ready"
+                    let cacheDir = FluidTranscriptionService.cacheDirectory()
+                    do {
+                        try self.fileManager.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: nil)
+                    } catch {
+                        print("⚠️ Unable to ensure FluidAudio cache directory: \(error.localizedDescription)")
+                    }
+                    try Task.checkCancellation()
+                    _ = try await AsrModels.downloadAndLoad(to: cacheDir)
+                    try Task.checkCancellation()
+                    await MainActor.run {
+                        self.currentStatus = "FluidAudio model ready"
                         self.isModelReady = true
-                        self.isPreparingFluidModels = false
+                        self.downloadProgress = nil
+                        self.isPreparingFluidModel = false
                         NotificationCenter.default.post(name: .modelIsReady, object: self)
+                        self.fluidPreparationTask = nil
+                    }
+                } catch is CancellationError {
+                    await MainActor.run {
+                        self.isPreparingFluidModel = false
+                        self.downloadProgress = nil
+                        self.currentStatus = "Ready"
+                        self.fluidPreparationTask = nil
                     }
                 } catch {
-                    DispatchQueue.main.async {
-                        self.currentStatus = "Error preparing FluidAudio models: \(error.localizedDescription)"
+                    await MainActor.run {
+                        self.currentStatus = "Error preparing FluidAudio model: \(error.localizedDescription)"
                         self.isModelReady = false
-                        self.isPreparingFluidModels = false
+                        self.downloadProgress = nil
+                        self.isPreparingFluidModel = false
                         NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+                        self.fluidPreparationTask = nil
                     }
                 }
             }
@@ -200,16 +564,30 @@ final class ModelManager: @unchecked Sendable {
             return
         }
 
-        Task { [weak self] in
+        whisperPreparationTask?.cancel()
+        whisperPreparationTask = Task { [weak self] in
             guard let self = self else { return }
             do {
+                try Task.checkCancellation()
                 _ = try await self.prepareModelForUse(modelID: targetID)
+                try Task.checkCancellation()
             } catch {
-                await MainActor.run {
-                    self.currentStatus = "Error preparing model: \(error.localizedDescription)"
-                    self.isModelReady = false
-                    self.downloadProgress = nil
+                if (error is CancellationError) || Task.isCancelled {
+                    await MainActor.run {
+                        self.downloadProgress = nil
+                        self.isModelReady = false
+                        self.currentStatus = "Ready"
+                    }
+                } else {
+                    await MainActor.run {
+                        self.currentStatus = "Error preparing model: \(error.localizedDescription)"
+                        self.isModelReady = false
+                        self.downloadProgress = nil
+                    }
                 }
+            }
+            await MainActor.run {
+                self.whisperPreparationTask = nil
             }
         }
     }
@@ -224,6 +602,7 @@ final class ModelManager: @unchecked Sendable {
             }
             throw ModelPreparationError.modelsDirectoryUnavailable
         }
+        try Task.checkCancellation()
 
         let trimmedID = requestedModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
         let identifier: String
@@ -250,6 +629,7 @@ final class ModelManager: @unchecked Sendable {
             }
             throw ModelPreparationError.modelNotFound(identifier)
         }
+        try Task.checkCancellation()
 
         await MainActor.run {
             self.suppressAutoPrepare = true
@@ -272,6 +652,7 @@ final class ModelManager: @unchecked Sendable {
         }
         defer { resetPreparing() }
 
+        try Task.checkCancellation()
         let filesExist: Bool
         do {
             filesExist = try await checkModelFilesExist(model: model, directory: modelsDir)
@@ -284,6 +665,7 @@ final class ModelManager: @unchecked Sendable {
             }
             throw error
         }
+        try Task.checkCancellation()
 
         if filesExist, let paths = getPaths(for: model, directory: modelsDir) {
             await MainActor.run {
@@ -300,6 +682,7 @@ final class ModelManager: @unchecked Sendable {
             self.downloadProgress = 0.0
             self.isModelReady = false
         }
+        try Task.checkCancellation()
 
         do {
             try await downloadAndPrepareModel(model: model, directory: modelsDir)
@@ -312,6 +695,7 @@ final class ModelManager: @unchecked Sendable {
             }
             throw error
         }
+        try Task.checkCancellation()
 
         guard let preparedPaths = getPaths(for: model, directory: modelsDir) else {
             await MainActor.run {
@@ -328,21 +712,36 @@ final class ModelManager: @unchecked Sendable {
 
     private func checkModelFilesExist(model: Model, directory: URL) async throws -> Bool {
         for fileInfo in model.files {
-            let localURL = directory.appendingPathComponent(fileInfo.filename)
             var isDirectory: ObjCBool = false
 
-            // If it's a zip, we check for the expected *unzipped* directory name.
-            // Assuming unzipped name is the zip filename without .zip
             if fileInfo.type == "zip" {
                 let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
-                let unzippedURL = directory.appendingPathComponent(unzippedName)
-                 if !(fileManager.fileExists(atPath: unzippedURL.path, isDirectory: &isDirectory) && isDirectory.boolValue) {
-                    print("Missing unzipped directory: \(unzippedURL.path)")
+                let mainURL = directory.appendingPathComponent(unzippedName)
+                let userURL = userModelsDirectory?.appendingPathComponent(unzippedName)
+                let existsInMain = fileManager.fileExists(atPath: mainURL.path, isDirectory: &isDirectory) && isDirectory.boolValue
+                let existsInUser = (userURL != nil) && fileManager.fileExists(atPath: userURL!.path, isDirectory: &isDirectory) && isDirectory.boolValue
+                if !(existsInMain || existsInUser) {
+                    print("Missing unzipped directory in main/user: \(mainURL.path) / \(userURL?.path ?? "nil")")
                     return false
                 }
-            } else { // For .bin files, check the file itself
-                if !fileManager.fileExists(atPath: localURL.path, isDirectory: &isDirectory) || isDirectory.boolValue {
-                     print("Missing file: \(localURL.path)")
+            } else if fileInfo.type == "mlmodelc" {
+                let mainURL = directory.appendingPathComponent(fileInfo.filename)
+                let userURL = userModelsDirectory?.appendingPathComponent(fileInfo.filename)
+                let existsInMain = fileManager.fileExists(atPath: mainURL.path, isDirectory: &isDirectory) && isDirectory.boolValue
+                let existsInUser = (userURL != nil) && fileManager.fileExists(atPath: userURL!.path, isDirectory: &isDirectory) && isDirectory.boolValue
+                if !(existsInMain || existsInUser) {
+                    print("Missing Core ML bundle in main/user: \(mainURL.path) / \(userURL?.path ?? "nil")")
+                    return false
+                }
+            } else { // For .bin and other regular files
+                let mainURL = directory.appendingPathComponent(fileInfo.filename)
+                var exists = fileManager.fileExists(atPath: mainURL.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+                if !exists, let userDir = userModelsDirectory {
+                    let userURL = userDir.appendingPathComponent(fileInfo.filename)
+                    exists = fileManager.fileExists(atPath: userURL.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+                }
+                if !exists {
+                    print("Missing file in main/user: \(mainURL.path)")
                     return false
                 }
             }
@@ -364,8 +763,10 @@ final class ModelManager: @unchecked Sendable {
             let destinationURL = directory.appendingPathComponent(fileInfo.filename)
             var needsDownload = true
 
-            // Always redownload for a clean start
-            needsDownload = true
+            // For locally imported models, skip network downloads entirely
+            if fileInfo.url == "local" || fileInfo.url.lowercased().hasPrefix("file://") {
+                needsDownload = false
+            }
             
             if needsDownload {
                 guard let url = URL(string: fileInfo.url) else {
@@ -392,6 +793,8 @@ final class ModelManager: @unchecked Sendable {
                     allFilesReady = false
                     throw error
                 }
+            } else if fileInfo.type == "zip" {
+                downloadedZipURLs.append(destinationURL)
             }
         }
 
@@ -782,9 +1185,14 @@ final class ModelManager: @unchecked Sendable {
 
         for fileInfo in model.files {
             let localURL = directory.appendingPathComponent(fileInfo.filename)
+            let localUserURL = userModelsDirectory?.appendingPathComponent(fileInfo.filename)
 
             if fileInfo.type == "bin" {
-                let fileExists = fileManager.fileExists(atPath: localURL.path)
+                var fileExists = fileManager.fileExists(atPath: localURL.path)
+                if !fileExists, let userURL = localUserURL {
+                    fileExists = fileManager.fileExists(atPath: userURL.path)
+                    if fileExists { binPath = userURL }
+                }
 
                 do {
                     let resourceValues = try localURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey])
@@ -795,12 +1203,13 @@ final class ModelManager: @unchecked Sendable {
 
                 if fileExists {
                     do {
-                        let fileHandle = try FileHandle(forReadingFrom: localURL)
+                        let actualURL = (binPath ?? localURL)
+                        let fileHandle = try FileHandle(forReadingFrom: actualURL)
                         let header = try fileHandle.read(upToCount: 16)
                         try fileHandle.close()
 
                         if header != nil && !header!.isEmpty {
-                            binPath = localURL
+                            binPath = actualURL
                         }
                     } catch {
                         return nil
@@ -813,6 +1222,13 @@ final class ModelManager: @unchecked Sendable {
                             binPath = item
                             break
                         }
+                        if binPath == nil, let userDir = userModelsDirectory {
+                            let directoryContentsUser = try fileManager.contentsOfDirectory(at: userDir, includingPropertiesForKeys: nil)
+                            for item in directoryContentsUser where item.lastPathComponent.contains(baseName) {
+                                binPath = item
+                                break
+                            }
+                        }
                     } catch {
                         // Ignore directory listing errors here
                     }
@@ -824,6 +1240,7 @@ final class ModelManager: @unchecked Sendable {
             } else if fileInfo.type == "zip" {
                 let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
                 let unzippedURL = directory.appendingPathComponent(unzippedName)
+                let unzippedUserURL = userModelsDirectory?.appendingPathComponent(unzippedName)
                 var isDirectory: ObjCBool = false
 
                 if fileManager.fileExists(atPath: unzippedURL.path, isDirectory: &isDirectory) && isDirectory.boolValue {
@@ -835,7 +1252,21 @@ final class ModelManager: @unchecked Sendable {
                     } catch {
                         // Ignore listing errors; we'll fall back below
                     }
-                } else {
+                } else if let unzippedUserURL {
+                    var isDirUser: ObjCBool = false
+                    if fileManager.fileExists(atPath: unzippedUserURL.path, isDirectory: &isDirUser) && isDirUser.boolValue {
+                        do {
+                            let contents = try fileManager.contentsOfDirectory(atPath: unzippedUserURL.path)
+                            if !contents.isEmpty {
+                                encoderDir = unzippedUserURL
+                            }
+                        } catch {
+                            // ignore
+                        }
+                    }
+                }
+
+                if encoderDir == nil {
                     do {
                         let directoryContents = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey])
                         for item in directoryContents {
@@ -847,6 +1278,18 @@ final class ModelManager: @unchecked Sendable {
                                 }
                             }
                         }
+                        if encoderDir == nil, let userDir = userModelsDirectory {
+                            let directoryContentsUser = try fileManager.contentsOfDirectory(at: userDir, includingPropertiesForKeys: [.isDirectoryKey])
+                            for item in directoryContentsUser {
+                                var isDir: ObjCBool = false
+                                if fileManager.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
+                                    if item.lastPathComponent.contains("encoder") || item.lastPathComponent.contains("mlmodelc") {
+                                        encoderDir = item
+                                        break
+                                    }
+                                }
+                            }
+                        }
                     } catch {
                         // Ignore listing errors here
                     }
@@ -855,13 +1298,26 @@ final class ModelManager: @unchecked Sendable {
                         return nil
                     }
                 }
+            } else if fileInfo.type == "mlmodelc" {
+                let mlDir = directory.appendingPathComponent(fileInfo.filename)
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: mlDir.path, isDirectory: &isDir) && isDir.boolValue {
+                    encoderDir = mlDir
+                } else if let userDir = userModelsDirectory {
+                    let userMLDir = userDir.appendingPathComponent(fileInfo.filename)
+                    if fileManager.fileExists(atPath: userMLDir.path, isDirectory: &isDir) && isDir.boolValue {
+                        encoderDir = userMLDir
+                    }
+                }
             }
         }
 
-        guard let bin = binPath, let encoder = encoderDir else {
-            return nil
+        // Fallback: encoder assets are optional for Whisper. If not specified, use the model directory.
+        if let bin = binPath {
+            if encoderDir == nil { encoderDir = directory }
+            if let encoder = encoderDir { return (bin, encoder) }
         }
-        return (bin, encoder)
+        return nil
     }
 
     func getPathsForSelectedModel() -> (binPath: URL, encoderDir: URL)? {

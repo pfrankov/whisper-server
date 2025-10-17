@@ -573,7 +573,7 @@
 				8DE541E92D919CD10015BF48 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 		8DE541EA2D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServer" */ = {
 			isa = XCConfigurationList;
@@ -582,7 +582,7 @@
 				8DE541EC2D919CD10015BF48 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 		8DE541ED2D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServerTests" */ = {
 			isa = XCConfigurationList;
@@ -591,7 +591,7 @@
 				8DE541EF2D919CD10015BF48 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 		8DE541F02D919CD10015BF48 /* Build configuration list for PBXNativeTarget "WhisperServerUITests" */ = {
 			isa = XCConfigurationList;
@@ -600,7 +600,7 @@
 				8DE541F22D919CD10015BF48 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
 

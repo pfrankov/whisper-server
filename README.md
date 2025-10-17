@@ -194,5 +194,10 @@ cd whisper-server
 ### Testing
 - Run the app, then run the script: `test_api.sh` (complete API test suite)
 
+### Importing Custom Models
+- In the menu bar, open `Select Model` → `Import Whisper Model…`
+- Choose a `.bin` model file (optionally add its `.mlmodelc` bundle in the same dialog)
+- The model becomes selectable in the menu and is listed in `GET /v1/models`
+
 ## License
 MIT

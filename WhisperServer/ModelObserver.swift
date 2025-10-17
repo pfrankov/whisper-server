@@ -150,9 +150,22 @@ final class ModelObserver: ObservableObject {
                 print("⚠️ Model was reported ready but isModelReady is false")
                 return
             }
+
+            if self.modelManager.selectedProvider == .fluid {
+                self.menuBarService?.updateMetalStatus(isActive: false)
+                self.menuBarService?.hideDownloadProgress()
+                if self.serverCoordinator?.isRunning == false {
+                    self.serverCoordinator?.startServer()
+                }
+                return
+            }
             
             if self.modelManager.getPathsForSelectedModel() != nil {
                 self.menuBarService?.updateMetalStatus(isActive: false)
+                self.menuBarService?.hideDownloadProgress()
+                if self.serverCoordinator?.isRunning == false {
+                    self.serverCoordinator?.startServer()
+                }
             } else {
                 print("❌ Model reported ready but paths unavailable")
                 self.handleModelPreparationFailed()
@@ -182,11 +195,16 @@ final class ModelObserver: ObservableObject {
 
     @objc private func handleModelProgressChanged() {
         DispatchQueue.main.async { [weak self] in
-            guard let self = self,
-                  let progress = self.modelManager.downloadProgress else { return }
+            guard let self = self else { return }
 
-            self.menuBarService?.showDownloadProgress(progress)
-            self.serverCoordinator?.stopServer()
+            if let progress = self.modelManager.downloadProgress {
+                self.menuBarService?.showDownloadProgress(progress)
+                if progress < 1.0, self.serverCoordinator?.isRunning == true {
+                    self.serverCoordinator?.stopServer()
+                }
+            } else {
+                self.menuBarService?.hideDownloadProgress()
+            }
         }
     }
 
