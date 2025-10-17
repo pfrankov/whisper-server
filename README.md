@@ -43,6 +43,14 @@ This app is not signed by Apple. To open it the first time:
 4. Or go to System Settings → Privacy & Security and allow the app.
 
 ## Usage
+###  Apple Shortcut
+[From Audio to SRT](https://www.icloud.com/shortcuts/064f7f2047524421b4b8b8e7f1612608)
+<details>
+  <summary>Example</summary>
+  <p><video src="https://github.com/user-attachments/assets/1e75e284-f178-460c-a42b-182acea03480"/></p>
+</details>
+
+### HTTP
 ```bash
 curl -X POST http://localhost:12017/v1/audio/transcriptions \
   -F file=@/path/to/audio.mp3
