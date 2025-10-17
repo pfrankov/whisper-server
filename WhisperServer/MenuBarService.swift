@@ -378,9 +378,9 @@ final class MenuBarService: ObservableObject {
     @objc private func resetApplicationData(_ sender: NSMenuItem) {
         let alert = NSAlert()
         alert.messageText = "Reset Application Data?"
-        alert.informativeText = "All downloaded models, cached assets, and saved preferences will be removed. The app will behave like a fresh install."
+        alert.informativeText = "All downloaded models, cached assets, and saved preferences will be removed. The app will close after the reset."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Reset & Quit")
         alert.addButton(withTitle: "Cancel")
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -388,12 +388,11 @@ final class MenuBarService: ObservableObject {
         serverCoordinator?.stopServer()
         WhisperTranscriptionService.cleanup()
 
-        defer {
-            serverCoordinator?.startServer()
-        }
-
         do {
             try modelManager.resetAllData()
+            
+            // Successfully reset, quit the app
+            NSApp.terminate(nil)
         } catch {
             let errorAlert = NSAlert()
             errorAlert.messageText = "Unable to reset data"
@@ -401,6 +400,9 @@ final class MenuBarService: ObservableObject {
             errorAlert.alertStyle = .warning
             errorAlert.addButton(withTitle: "OK")
             errorAlert.runModal()
+            
+            // Restart server on error
+            serverCoordinator?.startServer()
         }
     }
 #endif

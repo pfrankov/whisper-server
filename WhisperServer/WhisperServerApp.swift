@@ -47,6 +47,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Make app appear only in menu bar (no dock icon)
         NSApp.setActivationPolicy(.accessory)
         
+        // Check DEBUG flag status
+        #if DEBUG
+        print("✅ DEBUG mode is ACTIVE")
+        #else
+        print("❌ DEBUG mode is INACTIVE (Release build)")
+        #endif
+        
         // Initialize services
         menuBarService.setupMenuBar()
         modelObserver.updateUIForModelPreparation()
