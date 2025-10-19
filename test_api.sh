@@ -333,6 +333,37 @@ sys.exit(0)
 PY
 }
 
+validate_json_text_no_speakers() {
+    if ! validate_json_text; then
+        return 1
+    fi
+    BODY="$LAST_BODY" python3 - <<'PY'
+import json, os, sys
+body = os.environ.get("BODY", "")
+data = json.loads(body)
+if "speaker_segments" in data:
+    print("Unexpected 'speaker_segments' field in default JSON response", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+validate_json_text_with_speakers() {
+    if ! validate_json_text; then
+        return 1
+    fi
+    BODY="$LAST_BODY" python3 - <<'PY'
+import json, os, sys
+body = os.environ.get("BODY", "")
+data = json.loads(body)
+segments = data.get("speaker_segments")
+if not isinstance(segments, list):
+    print("'speaker_segments' missing or not a list", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
 validate_text_plain() {
     local trimmed
     trimmed=$(printf '%s' "$LAST_BODY" | tr -d '\r')
@@ -374,6 +405,37 @@ for idx, seg in enumerate(segments):
     if not isinstance(seg["text"], str) or not seg["text"].strip():
         print(f"Segment {idx} has empty text", file=sys.stderr)
         sys.exit(1)
+sys.exit(0)
+PY
+}
+
+validate_verbose_json_with_speakers() {
+    if ! validate_verbose_json; then
+        return 1
+    fi
+    BODY="$LAST_BODY" python3 - <<'PY'
+import json, os, sys
+body = os.environ.get("BODY", "")
+data = json.loads(body)
+segments = data.get("speaker_segments")
+if not isinstance(segments, list):
+    print("'speaker_segments' missing or not a list in verbose JSON", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+validate_verbose_json_no_speakers() {
+    if ! validate_verbose_json; then
+        return 1
+    fi
+    BODY="$LAST_BODY" python3 - <<'PY'
+import json, os, sys
+body = os.environ.get("BODY", "")
+data = json.loads(body)
+if "speaker_segments" in data:
+    print("Unexpected 'speaker_segments' field in verbose JSON response", file=sys.stderr)
+    sys.exit(1)
 sys.exit(0)
 PY
 }
@@ -500,7 +562,8 @@ if expected == 'text':
         if payload.lstrip().startswith('{'):
             print("Text SSE payload unexpectedly JSON", file=sys.stderr)
             sys.exit(1)
-elif expected == 'json':
+elif expected in ('json', 'json_with_speakers', 'json_no_speakers'):
+    found_speakers = False
     for payload in filtered:
         try:
             obj = json.loads(payload)
@@ -510,6 +573,18 @@ elif expected == 'json':
         if 'text' not in obj:
             print("JSON SSE payload missing 'text'", file=sys.stderr)
             sys.exit(1)
+        if 'speaker_segments' in obj:
+            segments = obj['speaker_segments']
+            if not isinstance(segments, list):
+                print("'speaker_segments' is not a list in SSE payload", file=sys.stderr)
+                sys.exit(1)
+            found_speakers = True
+    if expected == 'json_with_speakers' and not found_speakers:
+        print("Expected 'speaker_segments' in SSE payload", file=sys.stderr)
+        sys.exit(1)
+    if expected == 'json_no_speakers' and found_speakers:
+        print("Unexpected 'speaker_segments' in SSE payload", file=sys.stderr)
+        sys.exit(1)
 elif expected == 'srt':
     joined = "\n".join(filtered)
     if '-->' not in joined:
@@ -542,6 +617,8 @@ PY
 
 validate_sse_text() { validate_sse_stream "text"; }
 validate_sse_json() { validate_sse_stream "json"; }
+validate_sse_json_no_speakers() { validate_sse_stream "json_no_speakers"; }
+validate_sse_json_with_speakers() { validate_sse_stream "json_with_speakers"; }
 validate_sse_srt() { validate_sse_stream "srt"; }
 validate_sse_vtt() { validate_sse_stream "vtt"; }
 validate_sse_verbose() { validate_sse_stream "verbose_json"; }
@@ -1146,12 +1223,12 @@ run_fluid_suite() {
     printf "%b💧 FLUID MODEL UNDER TEST: %s%b\n" "$BLUE" "$CURRENT_MODEL" "$NC"
     printf "%b==============================%b\n\n" "$BLUE" "$NC"
 
-    run_http_test "Fluid JSON Response" 200 validate_json_text \
+    run_http_test "Fluid JSON Response" 200 validate_json_text_no_speakers \
         -X POST "$SERVER_URL/v1/audio/transcriptions" \
         -F "file=@$TEST_AUDIO" \
         -F "model=$CURRENT_MODEL"
 
-    run_http_test "Fluid JSON (explicit)" 200 validate_json_text \
+    run_http_test "Fluid JSON (explicit)" 200 validate_json_text_no_speakers \
         -X POST "$SERVER_URL/v1/audio/transcriptions" \
         -F "file=@$TEST_AUDIO" \
         -F "response_format=json" \
@@ -1163,14 +1240,14 @@ run_fluid_suite() {
         -F "response_format=text" \
         -F "model=$CURRENT_MODEL"
 
-    run_http_test "Fluid language parameter" 200 validate_json_text \
+    run_http_test "Fluid language parameter" 200 validate_json_text_no_speakers \
         -X POST "$SERVER_URL/v1/audio/transcriptions" \
         -F "file=@$TEST_AUDIO" \
         -F "language=en" \
         -F "response_format=json" \
         -F "model=$CURRENT_MODEL"
 
-    run_http_test "Fluid prompt parameter" 200 validate_json_text \
+    run_http_test "Fluid prompt parameter" 200 validate_json_text_no_speakers \
         -X POST "$SERVER_URL/v1/audio/transcriptions" \
         -F "file=@$TEST_AUDIO" \
         -F "prompt=This is a test" \
@@ -1199,7 +1276,7 @@ run_fluid_suite() {
         -F "response_format=vtt" \
         -F "model=$CURRENT_MODEL"
 
-    run_http_test "Fluid Verbose JSON format" 200 validate_verbose_json \
+    run_http_test "Fluid Verbose JSON format" 200 validate_verbose_json_no_speakers \
         -X POST "$SERVER_URL/v1/audio/transcriptions" \
         -F "file=@$TEST_AUDIO" \
         -F "response_format=verbose_json" \
@@ -1213,7 +1290,7 @@ run_fluid_suite() {
         -F "stream=true" \
         -F "model=$CURRENT_MODEL"
 
-    run_sse_test "Fluid SSE JSON" validate_sse_json \
+    run_sse_test "Fluid SSE JSON" validate_sse_json_no_speakers \
         -H "Accept: text/event-stream" \
         -X POST "$SERVER_URL/v1/audio/transcriptions" \
         -F "file=@$TEST_AUDIO" \
@@ -1229,11 +1306,34 @@ run_fluid_suite() {
         -F "stream=true" \
         -F "model=$CURRENT_MODEL"
 
-    run_http_test_with_headers "Fluid JSON headers" 200 validate_json_text "application/json" \
+    run_http_test_with_headers "Fluid JSON headers" 200 validate_json_text_no_speakers "application/json" \
         -X POST "$SERVER_URL/v1/audio/transcriptions" \
         -F "file=@$TEST_AUDIO" \
         -F "response_format=json" \
         -F "model=$CURRENT_MODEL"
+
+    run_http_test "Fluid JSON diarization opt-in" 200 validate_json_text_with_speakers \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=json" \
+        -F "model=$CURRENT_MODEL" \
+        -F "diarize=true"
+
+    run_http_test "Fluid Verbose JSON diarization" 200 validate_verbose_json_with_speakers \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=verbose_json" \
+        -F "model=$CURRENT_MODEL" \
+        -F "diarize=true"
+
+    run_sse_test "Fluid SSE JSON diarization" validate_sse_json_with_speakers \
+        -H "Accept: text/event-stream" \
+        -X POST "$SERVER_URL/v1/audio/transcriptions" \
+        -F "file=@$TEST_AUDIO" \
+        -F "response_format=json" \
+        -F "stream=true" \
+        -F "model=$CURRENT_MODEL" \
+        -F "diarize=true"
 
     run_http_test_with_headers "Fluid text headers" 200 validate_text_plain "text/plain; charset=utf-8" \
         -X POST "$SERVER_URL/v1/audio/transcriptions" \

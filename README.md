@@ -64,6 +64,7 @@ curl -X POST http://localhost:12017/v1/audio/transcriptions \
 | prompt           | Guide style/tone (Whisper)         | string                              | no       |
 | response_format  | Output format                      | json, text, srt, vtt, verbose_json  | no       |
 | language         | Input language (ISO 639‑1)         | 2‑letter code                       | no       |
+| diarize          | Enable Fluid speaker diarization   | true, false (default false)         | no       |
 | stream           | Enable streaming (SSE or chunked)  | true, false                         | no       |
 
 ### Models
@@ -177,6 +178,50 @@ curl -X POST http://localhost:12017/v1/audio/transcriptions \
   -F stream=true \
   --no-buffer
 ```
+
+## FluidAudio diarization
+
+Add speaker labels (who is talking) when you use the FluidAudio provider. Diarization is off by default to stay compatible with the OpenAI Whisper API.
+
+How to enable:
+- Select the Fluid provider in the menu bar (or pass the Fluid model ID), and
+- Add `diarize=true` to your request.
+
+Example:
+```bash
+curl -X POST http://localhost:12017/v1/audio/transcriptions \
+  -F file=@meeting.wav \
+  -F model=parakeet-tdt-0.6b-v3 \
+  -F response_format=json \
+  -F diarize=true
+```
+
+What you get:
+- For `response_format=json`, the server adds a `speaker_segments` array:
+  ```json
+  {
+    "text": "Good morning everyone...",
+    "speaker_segments": [
+      {
+        "speaker": "Speaker_1",
+        "start": 0.0,
+        "end": 4.2,
+        "text": "Good morning everyone"
+      },
+      {
+        "speaker": "Speaker_2",
+        "start": 4.2,
+        "end": 7.8,
+        "text": "Morning! Shall we begin?"
+      }
+    ]
+  }
+  ```
+- For `response_format=verbose_json`, `speaker_segments` is added as well. The existing `segments` field stays unchanged.
+
+Streaming:
+- Streaming sends one JSON chunk with `speaker_segments` when diarization completes.
+- Then the standard `end` event is sent.
 
 ## Build from Source
 If you want to build WhisperServer yourself:

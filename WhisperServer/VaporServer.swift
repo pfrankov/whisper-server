@@ -187,6 +187,48 @@ final class VaporServer {
         }
     }
 
+    private func serializeSpeakerSegments(_ segments: [FluidTranscriptionService.SpeakerSegment]) -> [[String: Any]] {
+        segments.map { segment in
+            [
+                "speaker": segment.speakerId,
+                "start": segment.startTime,
+                "end": segment.endTime,
+                "text": segment.text
+            ]
+        }
+    }
+
+    private func verboseJSON(
+        for result: FluidTranscriptionService.TranscriptionResult,
+        includeDiarization: Bool
+    ) -> String? {
+        let segmentDicts: [[String: Any]] = result.segments.compactMap { segment in
+            let trimmedText = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedText.isEmpty else { return nil }
+            return [
+                "start": segment.startTime,
+                "end": segment.endTime,
+                "text": trimmedText
+            ]
+        }
+
+        var payload: [String: Any] = [
+            "text": result.text,
+            "segments": segmentDicts
+        ]
+
+        if includeDiarization {
+            payload["speaker_segments"] = serializeSpeakerSegments(result.speakerSegments)
+        }
+
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: .prettyPrinted),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return json
+    }
+
     /// Wrap data for SSE if needed
     private func wrapForSSE(_ data: String, enabled: Bool) -> String {
         return enabled ? formatSSEData(data) : data
@@ -321,6 +363,7 @@ final class VaporServer {
                 var response_format: String?
                 var stream: Bool?
                 var model: String?    // optional model identifier; resolves across Whisper and FluidAudio catalogs
+                var diarize: Bool?
             }
             
             let whisperReq = try req.content.decode(WhisperRequest.self)
@@ -371,6 +414,7 @@ final class VaporServer {
             }
             let requestedModelID = whisperReq.model?.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedModelID = (requestedModelID?.isEmpty ?? true) ? nil : requestedModelID
+            let includeDiarization = (whisperReq.diarize == true)
 
             // Early preflight: ensure the requested model (if any) exists across Fluid and Whisper catalogs
             let isKnownFluid = (normalizedModelID != nil) && (FluidTranscriptionService.modelDescriptor(for: normalizedModelID!) != nil)
@@ -638,10 +682,10 @@ final class VaporServer {
                         case .fluid:
                             // Do the work asynchronously, then emit a single chunk
                             Task {
-                                let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
-                                let activeModelName = progressModelName ?? descriptor.displayName
-                                let progressTracker = ProgressTracker(modelName: activeModelName)
-                                let selectedLanguage = fluidLanguage
+                            let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                            let activeModelName = progressModelName ?? descriptor.displayName
+                            let progressTracker = ProgressTracker(modelName: activeModelName)
+                            let selectedLanguage = fluidLanguage
                                 defer {
                                     req.eventLoop.execute {
                                         self.finishStream(
@@ -663,31 +707,29 @@ final class VaporServer {
                                     }
                                 }
 
-                                if let transcription = await FluidTranscriptionService.transcribeText(
+                                if let result = await FluidTranscriptionService.transcribeAudio(
                                     at: tempFileURL,
                                     language: selectedLanguage,
-                                    model: descriptor
+                                    model: descriptor,
+                                    includeDiarization: includeDiarization
                                 ) {
-                                    let trimmed = transcription.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                                     let output: String
                                     switch responseFormat {
                                     case .json:
-                                        if trimmed.isEmpty {
-                                            let jsonResponse: [String: Any] = ["error": "Empty transcription", "text": ""]
-                                            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
-                                               let jsonString = String(data: jsonData, encoding: .utf8) {
-                                                output = jsonString + "\n"
-                                            } else {
-                                                output = "{\"error\":\"Empty transcription\",\"text\":\"\"}\n"
-                                            }
+                                        var jsonResponse: [String: Any] = trimmed.isEmpty
+                                            ? ["error": "Empty transcription", "text": ""]
+                                            : ["text": trimmed]
+
+                                        if includeDiarization {
+                                            jsonResponse["speaker_segments"] = self.serializeSpeakerSegments(result.speakerSegments)
+                                        }
+
+                                        if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
+                                           let jsonString = String(data: jsonData, encoding: .utf8) {
+                                            output = jsonString + "\n"
                                         } else {
-                                            let jsonResponse = ["text": trimmed]
-                                            if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
-                                               let jsonString = String(data: jsonData, encoding: .utf8) {
-                                                output = jsonString + "\n"
-                                            } else {
-                                                output = "\n"
-                                            }
+                                            output = "{\"error\":\"Failed to encode JSON response\"}\n"
                                         }
                                     default:
                                         output = trimmed.isEmpty ? "No speech detected\n" : (trimmed + "\n")
@@ -756,7 +798,8 @@ final class VaporServer {
                         if let result = await FluidTranscriptionService.transcribeAudio(
                             at: tempFileURL,
                             language: fluidLanguage,
-                            model: descriptor
+                            model: descriptor,
+                            includeDiarization: includeDiarization
                         ) {
                             progressTracker.markComplete()
                             switch responseFormat {
@@ -767,8 +810,13 @@ final class VaporServer {
                                 responseBody = WhisperTranscriptionService.formatAsVTT(segments: result.segments)
                                 contentType = self.contentType(for: .vtt)
                             case .verboseJson:
-                                responseBody = WhisperTranscriptionService.formatAsVerboseJSON(segments: result.segments)
-                                contentType = self.contentType(for: .verboseJson)
+                                if let verbose = self.verboseJSON(for: result, includeDiarization: includeDiarization) {
+                                    responseBody = verbose
+                                    contentType = self.contentType(for: .verboseJson)
+                                } else {
+                                    responseBody = "{\"error\": \"Failed to create verbose JSON response.\"}"
+                                    contentType = self.contentType(for: .json)
+                                }
                             default:
                                 responseBody = "{\"error\": \"Unsupported response format\"}"
                                 contentType = self.contentType(for: .json)
@@ -819,12 +867,16 @@ final class VaporServer {
                         if let result = await FluidTranscriptionService.transcribeAudio(
                             at: tempFileURL,
                             language: fluidLanguage,
-                            model: descriptor
+                            model: descriptor,
+                            includeDiarization: includeDiarization
                         ) {
                             progressTracker.markComplete()
                             switch responseFormat {
                             case .json:
-                                let jsonResponse = ["text": result.text]
+                                var jsonResponse: [String: Any] = ["text": result.text]
+                                if includeDiarization {
+                                    jsonResponse["speaker_segments"] = self.serializeSpeakerSegments(result.speakerSegments)
+                                }
                                 if let jsonData = try? JSONSerialization.data(withJSONObject: jsonResponse),
                                    let jsonString = String(data: jsonData, encoding: .utf8) {
                                     responseBody = jsonString

@@ -34,6 +34,14 @@ struct FluidTranscriptionService {
         let text: String
         let segments: [TranscriptionSegment]
         let duration: TimeInterval
+        let speakerSegments: [SpeakerSegment]
+    }
+
+    struct SpeakerSegment {
+        let speakerId: String
+        let startTime: TimeInterval
+        let endTime: TimeInterval
+        let text: String
     }
 
     private static let sentenceTerminators: Set<Character> = [
@@ -92,6 +100,16 @@ struct FluidTranscriptionService {
         return base.appendingPathComponent(defaultLeaf, isDirectory: true)
     }
 
+    static func diarizerCacheDirectory() -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let bundleID = Bundle.main.bundleIdentifier ?? "WhisperServer"
+        return appSupport
+            .appendingPathComponent(bundleID, isDirectory: true)
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent("FluidAudio", isDirectory: true)
+            .appendingPathComponent("speaker-diarization-coreml", isDirectory: true)
+    }
+
     // MARK: - Public API
 
     /// Transcribe a file to plain text using FluidAudio (non-streaming)
@@ -129,7 +147,8 @@ struct FluidTranscriptionService {
     static func transcribeAudio(
         at audioURL: URL,
         language _: String?,
-        model _: ModelDescriptor = FluidTranscriptionService.defaultModel
+        model _: ModelDescriptor = FluidTranscriptionService.defaultModel,
+        includeDiarization: Bool = false
     ) async -> TranscriptionResult? {
         // TODO: Apply model selection when FluidAudio API supports it
         // Currently AsrModels.downloadAndLoad() uses the default model without allowing selection
@@ -142,7 +161,11 @@ struct FluidTranscriptionService {
                 return nil
             }
 
-            return makeTranscriptionResult(from: asrResult)
+            return await makeTranscriptionResult(
+                from: asrResult,
+                audioURL: audioURL,
+                includeDiarization: includeDiarization
+            )
         } catch {
             print("❌ FluidAudio transcription failed: \(error)")
             return nil
@@ -151,7 +174,11 @@ struct FluidTranscriptionService {
 
     // MARK: - Helpers
 
-    private static func makeTranscriptionResult(from asrResult: ASRResult) -> TranscriptionResult? {
+    private static func makeTranscriptionResult(
+        from asrResult: ASRResult,
+        audioURL: URL,
+        includeDiarization: Bool
+    ) async -> TranscriptionResult? {
         guard let trimmedText = extractTrimmedText(from: asrResult) else { return nil }
 
         let segments = buildSegments(
@@ -163,7 +190,15 @@ struct FluidTranscriptionService {
         return TranscriptionResult(
             text: trimmedText,
             segments: segments,
-            duration: asrResult.duration
+            duration: asrResult.duration,
+            speakerSegments: includeDiarization
+                ? await runDiarization(
+                    for: audioURL,
+                    tokenTimings: asrResult.tokenTimings ?? [],
+                    fallbackText: trimmedText,
+                    duration: asrResult.duration
+                )
+                : []
         )
     }
 
@@ -197,6 +232,49 @@ struct FluidTranscriptionService {
         let fileResult = try await asrManager.transcribe(audioURL, source: .system)
         guard extractTrimmedText(from: fileResult) != nil else { return nil }
         return fileResult
+    }
+
+    private static func runDiarization(
+        for audioURL: URL,
+        tokenTimings: [TokenTiming],
+        fallbackText: String,
+        duration: TimeInterval
+    ) async -> [SpeakerSegment] {
+        do {
+            let converter = AudioConverter()
+            let samples = try converter.resampleAudioFile(audioURL)
+            guard !samples.isEmpty else { return [] }
+
+            guard let diarizationResult = try await FluidDiarizerCoordinator.shared.diarize(samples: samples) else {
+                return []
+            }
+
+            let speakerSegments = mapDiarizationSegments(
+                diarizationResult.segments,
+                tokens: tokenTimings,
+                duration: duration
+            )
+
+            if speakerSegments.isEmpty,
+               !fallbackText.isEmpty,
+               let firstSegment = diarizationResult.segments.first
+            {
+                let speakerIdentifier = String(describing: firstSegment.speakerId)
+                return [
+                    SpeakerSegment(
+                        speakerId: speakerIdentifier,
+                        startTime: 0.0,
+                        endTime: duration,
+                        text: fallbackText
+                    )
+                ]
+            }
+
+            return speakerSegments
+        } catch {
+            print("⚠️ FluidAudio diarization failed: \(error)")
+            return []
+        }
     }
 
     private static func normalizeSegmentText(_ raw: String) -> String {
@@ -238,17 +316,7 @@ struct FluidTranscriptionService {
             return fallbackSegments(text: fallbackText, duration: duration)
         }
 
-        // Optimize sorting: check if already sorted before creating a new array
-        let sortedTokens: [TokenTiming]
-        let needsSorting = tokenTimings.indices.dropFirst().contains { i in
-            tokenTimings[i].startTime < tokenTimings[i - 1].startTime
-        }
-        if needsSorting {
-            print("⚠️ Token timings are not sorted, sorting now")
-            sortedTokens = tokenTimings.sorted(by: { $0.startTime < $1.startTime })
-        } else {
-            sortedTokens = tokenTimings
-        }
+        let sortedTokens = sortedTokenTimings(tokenTimings)
 
         var segments: [TranscriptionSegment] = []
         var currentStart: TimeInterval?
@@ -376,5 +444,116 @@ struct FluidTranscriptionService {
             print("⚠️ Failed to create FluidAudio cache directory: \(error)")
         }
         return directory
+    }
+
+    static func prepareDiarizerCacheDirectory() -> URL {
+        let directory = diarizerCacheDirectory()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+        } catch {
+            print("⚠️ Failed to create FluidAudio diarizer directory: \(error)")
+        }
+        return directory
+    }
+
+    static func sortedTokenTimings(_ tokenTimings: [TokenTiming]) -> [TokenTiming] {
+        guard tokenTimings.count > 1 else { return tokenTimings }
+        let requiresSort = tokenTimings.indices.dropFirst().contains { index in
+            tokenTimings[index].startTime < tokenTimings[index - 1].startTime
+        }
+        if requiresSort {
+            print("⚠️ Token timings are not sorted, sorting now")
+            return tokenTimings.sorted { $0.startTime < $1.startTime }
+        }
+        return tokenTimings
+    }
+
+    static func mapDiarizationSegments(
+        _ diarizationSegments: [TimedSpeakerSegment],
+        tokens: [TokenTiming],
+        duration: TimeInterval
+    ) -> [SpeakerSegment] {
+        guard !diarizationSegments.isEmpty else { return [] }
+        guard duration.isFinite, duration > 0 else { return [] }
+
+        let sortedTokens = sortedTokenTimings(tokens)
+        var speakerSegments: [SpeakerSegment] = []
+        var currentTokenIndex = 0
+
+        for diarSegment in diarizationSegments {
+            let diarStart = TimeInterval(diarSegment.startTimeSeconds)
+            let diarEnd = TimeInterval(diarSegment.endTimeSeconds)
+            let sanitizedStart = max(0.0, diarStart)
+            let sanitizedEnd = min(duration, max(sanitizedStart, diarEnd))
+
+            guard sanitizedEnd > sanitizedStart else { continue }
+            guard sanitizedStart.isFinite, sanitizedEnd.isFinite else { continue }
+
+            while currentTokenIndex < sortedTokens.count,
+                  sortedTokens[currentTokenIndex].endTime <= sanitizedStart {
+                currentTokenIndex += 1
+            }
+
+            var buffer = ""
+            var scanIndex = currentTokenIndex
+
+            while scanIndex < sortedTokens.count {
+                let token = sortedTokens[scanIndex]
+                if token.startTime >= sanitizedEnd {
+                    break
+                }
+
+                if token.endTime > sanitizedStart {
+                    buffer += token.token
+                }
+                scanIndex += 1
+            }
+
+            let normalizedText = normalizeSegmentText(buffer)
+            if !normalizedText.isEmpty {
+                let speakerIdentifier = String(describing: diarSegment.speakerId)
+                speakerSegments.append(
+                    SpeakerSegment(
+                        speakerId: speakerIdentifier,
+                        startTime: sanitizedStart,
+                        endTime: sanitizedEnd,
+                        text: normalizedText
+                    )
+                )
+            }
+
+            currentTokenIndex = scanIndex
+        }
+
+        return speakerSegments
+    }
+}
+
+private actor FluidDiarizerCoordinator {
+    static let shared = FluidDiarizerCoordinator()
+
+    private var diarizer: DiarizerManager?
+
+    func diarize(samples: [Float]) async throws -> DiarizationResult? {
+        guard !samples.isEmpty else { return nil }
+        let manager = try await resolveManager()
+        return try manager.performCompleteDiarization(samples)
+    }
+
+    func reset() {
+        diarizer?.cleanup()
+        diarizer = nil
+    }
+
+    private func resolveManager() async throws -> DiarizerManager {
+        if let existing = diarizer {
+            return existing
+        }
+
+        let models = try await DiarizerModels.downloadIfNeeded(to: FluidTranscriptionService.prepareDiarizerCacheDirectory())
+        let manager = DiarizerManager()
+        manager.initialize(models: models)
+        diarizer = manager
+        return manager
     }
 }
