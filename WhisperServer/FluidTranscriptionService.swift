@@ -551,7 +551,12 @@ private actor FluidDiarizerCoordinator {
         }
 
         let models = try await DiarizerModels.downloadIfNeeded(to: FluidTranscriptionService.prepareDiarizerCacheDirectory())
-        let manager = DiarizerManager()
+        let config = DiarizerConfig(
+            clusteringThreshold: 0.65,  // Speaker separation sensitivity (0.5-0.9)
+            minSpeechDuration: 0.75,     // Minimum speech segment (seconds)
+            minSilenceGap: 0.25          // Minimum gap between speakers (seconds)
+        )
+        let manager = DiarizerManager(config: config)
         manager.initialize(models: models)
         diarizer = manager
         return manager
