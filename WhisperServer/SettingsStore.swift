@@ -39,6 +39,14 @@ final class SettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(requireAPIKey, forKey: Keys.requireAPIKey) }
     }
 
+    /// Thread-safe snapshot of the `requireAPIKey` flag for readers outside the
+    /// main actor (e.g. Vapor middleware on NIO event loops). `UserDefaults` is
+    /// documented as thread-safe, and `didSet` above writes to it before any
+    /// @Published observer fires — so there's no window where the value drifts.
+    static var isAPIKeyRequired: Bool {
+        UserDefaults.standard.bool(forKey: Keys.requireAPIKey)
+    }
+
     var lanWarningShown: Bool {
         get { UserDefaults.standard.bool(forKey: Keys.lanWarningShown) }
         set { UserDefaults.standard.set(newValue, forKey: Keys.lanWarningShown) }

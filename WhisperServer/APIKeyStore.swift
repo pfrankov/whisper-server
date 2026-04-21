@@ -103,7 +103,8 @@ final class APIKeyStore {
         var bytes = [UInt8](repeating: 0, count: 32)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         if status != errSecSuccess {
-            // Fallback: RNG pulled from /dev/urandom via arc4random_buf
+            // Fallback: Swift's SystemRandomNumberGenerator (backed by arc4random
+            // on Darwin) is cryptographically suitable as a last-resort source.
             for index in bytes.indices { bytes[index] = UInt8.random(in: 0...255) }
         }
         let hex = bytes.map { String(format: "%02x", $0) }.joined()
@@ -124,7 +125,9 @@ struct APIKeyAuthMiddleware: AsyncMiddleware {
             return try await next.respond(to: request)
         }
 
-        guard SettingsStore.shared.requireAPIKey else {
+        // Thread-safe read: SettingsStore routes the value through UserDefaults,
+        // which we can safely query from the NIO event loop without hopping to main.
+        guard SettingsStore.isAPIKeyRequired else {
             return try await next.respond(to: request)
         }
 
@@ -146,9 +149,15 @@ struct APIKeyAuthMiddleware: AsyncMiddleware {
     private static func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {
         let left = Array(lhs.utf8)
         let right = Array(rhs.utf8)
-        guard left.count == right.count else { return false }
-        var diff: UInt8 = 0
-        for index in left.indices { diff |= left[index] ^ right[index] }
+        // Fold the length difference into `diff` and iterate over the longer
+        // of the two buffers so unequal lengths don't short-circuit the compare.
+        let maxCount = max(left.count, right.count)
+        var diff = UInt(left.count ^ right.count)
+        for index in 0..<maxCount {
+            let leftByte = index < left.count ? UInt(left[index]) : 0
+            let rightByte = index < right.count ? UInt(right[index]) : 0
+            diff |= leftByte ^ rightByte
+        }
         return diff == 0
     }
 }
