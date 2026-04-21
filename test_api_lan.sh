@@ -20,9 +20,11 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 SERVER_URL="http://localhost:12017"
 PORT="12017"
-TEST_AUDIO="jfk.wav"
+TEST_AUDIO="$SCRIPT_DIR/jfk.wav"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

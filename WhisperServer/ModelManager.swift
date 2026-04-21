@@ -507,14 +507,28 @@ final class ModelManager: @unchecked Sendable {
 
     // MARK: - Downloaded Model Inspection & Deletion
 
-    /// Returns the IDs of bundled Whisper models whose primary .bin file is present on disk.
+    /// Returns the IDs of bundled Whisper models that have any associated on-disk artifact.
+    /// Includes unzipped directories for `.zip` entries so orphaned caches (e.g. the
+    /// encoder bundle left behind after a partial download) are still discoverable
+    /// from "Delete Downloaded Models".
     func downloadedBundledWhisperModelIDs() -> Set<String> {
         guard let dir = modelsDirectory else { return [] }
         var result: Set<String> = []
         for model in availableModels where !model.id.hasPrefix("user-") {
-            guard let binFile = model.files.first(where: { $0.type == "bin" }) else { continue }
-            let path = dir.appendingPathComponent(binFile.filename).path
-            if fileManager.fileExists(atPath: path) {
+            let hasAnyArtifact = model.files.contains { fileInfo in
+                let fileURL = dir.appendingPathComponent(fileInfo.filename)
+                if fileManager.fileExists(atPath: fileURL.path) { return true }
+
+                if fileInfo.type == "zip" {
+                    let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
+                    let unzippedURL = dir.appendingPathComponent(unzippedName)
+                    if fileManager.fileExists(atPath: unzippedURL.path) { return true }
+                }
+
+                return false
+            }
+
+            if hasAnyArtifact {
                 result.insert(model.id)
             }
         }
