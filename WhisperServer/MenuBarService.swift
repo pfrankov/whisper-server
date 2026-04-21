@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import Combine
 import SwiftUI
 
 /// Service responsible for managing the menu bar interface
@@ -45,6 +46,8 @@ final class MenuBarService: ObservableObject {
     private var isCurrentlyProcessing = false
     private let progressResetDelay: TimeInterval = 1.0
     private var currentServerPort: Int = 12017
+    private var cancellables: Set<AnyCancellable> = []
+
     // MARK: - Initialization
     
     init(modelManager: ModelManager, settingsStore: SettingsStore = .shared) {
@@ -59,10 +62,30 @@ final class MenuBarService: ObservableObject {
 #if DEBUG
         print("🔧 DEBUG build detected: Reset menu item enabled.")
 #endif
-        
+
         configureStatusButton()
         createMenu()
         setupNotificationObservers()
+        observeSettings()
+    }
+
+    /// Keeps menu item state in sync with SettingsStore — covers async rollbacks
+    /// (e.g. SMAppService.register failing after the toggle was optimistically flipped).
+    private func observeSettings() {
+        settingsStore.$launchAtLogin
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.syncLaunchAtLoginMenuItem(to: value)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func syncLaunchAtLoginMenuItem(to value: Bool) {
+        guard let topMenu = statusItem?.menu,
+              let prefItem = topMenu.item(withTag: MenuItemTags.preferences.rawValue),
+              let prefMenu = prefItem.submenu,
+              let item = prefMenu.item(withTag: MenuItemTags.launchAtLogin.rawValue) else { return }
+        item.state = value ? .on : .off
     }
     
     func setServerCoordinator(_ coordinator: ServerCoordinator) {
@@ -589,6 +612,13 @@ final class MenuBarService: ObservableObject {
             name: .modelManagerDidUpdate, 
             object: nil
         )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(refreshModelSelectionMenu),
+            name: .modelIsReady,
+            object: nil
+        )
     }
     
     // MARK: - Menu Actions
@@ -798,8 +828,9 @@ final class MenuBarService: ObservableObject {
     }
     
     @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        // The checkmark is driven by the Combine observer on SettingsStore.$launchAtLogin,
+        // so transient failure rollbacks in applyLaunchAtLogin end up reflected in the UI.
         settingsStore.launchAtLogin.toggle()
-        sender.state = settingsStore.launchAtLogin ? .on : .off
     }
 
     @objc private func toggleExposeOnLAN(_ sender: NSMenuItem) {
@@ -846,7 +877,14 @@ final class MenuBarService: ObservableObject {
         let goingOn = !settingsStore.requireAPIKey
 
         if goingOn {
-            let token = APIKeyStore.shared.ensureExists()
+            let token: String
+            do {
+                token = try APIKeyStore.shared.ensureExists()
+            } catch {
+                presentAPIKeyFailureAlert(error: error)
+                return
+            }
+
             if !settingsStore.apiKeyWarningShown {
                 let alert = NSAlert()
                 alert.messageText = "API key required for LAN requests"
@@ -875,7 +913,13 @@ final class MenuBarService: ObservableObject {
     }
 
     @objc private func copyAPIKey(_ sender: NSMenuItem) {
-        let token = APIKeyStore.shared.ensureExists()
+        let token: String
+        do {
+            token = try APIKeyStore.shared.ensureExists()
+        } catch {
+            presentAPIKeyFailureAlert(error: error)
+            return
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(token, forType: .string)
@@ -895,7 +939,13 @@ final class MenuBarService: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let fresh = APIKeyStore.shared.regenerate()
+        let fresh: String
+        do {
+            fresh = try APIKeyStore.shared.regenerate()
+        } catch {
+            presentAPIKeyFailureAlert(error: error)
+            return
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(fresh, forType: .string)
@@ -906,6 +956,16 @@ final class MenuBarService: ObservableObject {
         confirmation.alertStyle = .informational
         confirmation.addButton(withTitle: "OK")
         confirmation.runModal()
+    }
+
+    private func presentAPIKeyFailureAlert(error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Unable to store API key"
+        alert.informativeText = "\(error.localizedDescription)\n\nThe previous key (if any) was not replaced."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func quitApp() {

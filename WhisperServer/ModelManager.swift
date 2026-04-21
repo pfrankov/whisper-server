@@ -535,21 +535,25 @@ final class ModelManager: @unchecked Sendable {
             throw ModelDeletionError.modelNotFound(id)
         }
         guard let dir = modelsDirectory else {
-            throw ModelDeletionError.userModelsDirectoryUnavailable
+            throw ModelPreparationError.modelsDirectoryUnavailable
+        }
+
+        let removeIfExists: (URL) throws -> Void = { url in
+            if self.fileManager.fileExists(atPath: url.path) {
+                do {
+                    try self.fileManager.removeItem(at: url)
+                } catch {
+                    throw ModelDeletionError.fileRemovalFailed(path: url.path, underlying: error)
+                }
+            }
         }
 
         for fileInfo in model.files {
-            let fileURL = dir.appendingPathComponent(fileInfo.filename)
-            if fileManager.fileExists(atPath: fileURL.path) {
-                do { try fileManager.removeItem(at: fileURL) }
-                catch { throw ModelDeletionError.fileRemovalFailed(path: fileURL.path, underlying: error) }
-            }
+            try removeIfExists(dir.appendingPathComponent(fileInfo.filename))
+
             if fileInfo.type == "zip" {
                 let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
-                let unzippedURL = dir.appendingPathComponent(unzippedName)
-                if fileManager.fileExists(atPath: unzippedURL.path) {
-                    try? fileManager.removeItem(at: unzippedURL)
-                }
+                try removeIfExists(dir.appendingPathComponent(unzippedName))
             }
         }
 

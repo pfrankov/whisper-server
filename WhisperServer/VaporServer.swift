@@ -88,7 +88,15 @@ final class VaporServer {
             try app.start()
             DispatchQueue.main.async {
                 self.isRunning = true
-                print("✅ Vapor server started on http://\(hostname):\(self.port)")
+                if hostname == "0.0.0.0" {
+                    if let lanIP = NetworkUtility.primaryLocalIPv4() {
+                        print("✅ Vapor server listening on 0.0.0.0:\(self.port) — reachable at http://\(lanIP):\(self.port)")
+                    } else {
+                        print("✅ Vapor server listening on 0.0.0.0:\(self.port)")
+                    }
+                } else {
+                    print("✅ Vapor server started on http://\(hostname):\(self.port)")
+                }
             }
         } catch {
             print("❌ Failed to start Vapor server: \(error)")

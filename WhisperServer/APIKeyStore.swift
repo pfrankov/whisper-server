@@ -15,6 +15,17 @@ import NIOCore
 final class APIKeyStore {
     static let shared = APIKeyStore()
 
+    enum StoreError: LocalizedError {
+        case keychainFailure(OSStatus)
+
+        var errorDescription: String? {
+            switch self {
+            case .keychainFailure(let status):
+                return "Keychain operation failed (status \(status))."
+            }
+        }
+    }
+
     private let service: String
     private let account = "whisper-api-key"
 
@@ -25,11 +36,12 @@ final class APIKeyStore {
     // MARK: - Public API
 
     /// Returns the current key, generating and persisting one on first access if needed.
+    /// Throws if the Keychain write fails so callers can surface the error to the user.
     @discardableResult
-    func ensureExists() -> String {
+    func ensureExists() throws -> String {
         if let existing = current() { return existing }
         let fresh = Self.generateToken()
-        save(fresh)
+        try save(fresh)
         return fresh
     }
 
@@ -49,10 +61,11 @@ final class APIKeyStore {
     }
 
     /// Generates and stores a new key, replacing any existing one.
+    /// Throws if the Keychain write fails, leaving the previously stored key untouched.
     @discardableResult
-    func regenerate() -> String {
+    func regenerate() throws -> String {
         let fresh = Self.generateToken()
-        save(fresh)
+        try save(fresh)
         return fresh
     }
 
@@ -66,7 +79,7 @@ final class APIKeyStore {
         ]
     }
 
-    private func save(_ token: String) {
+    private func save(_ token: String) throws {
         let data = Data(token.utf8)
         var query = baseQuery()
 
@@ -78,9 +91,11 @@ final class APIKeyStore {
             let addStatus = SecItemAdd(query as CFDictionary, nil)
             if addStatus != errSecSuccess {
                 print("❌ Failed to store API key in Keychain (status \(addStatus))")
+                throw StoreError.keychainFailure(addStatus)
             }
         } else if updateStatus != errSecSuccess {
             print("❌ Failed to update API key in Keychain (status \(updateStatus))")
+            throw StoreError.keychainFailure(updateStatus)
         }
     }
 
@@ -98,8 +113,11 @@ final class APIKeyStore {
 
 // MARK: - Vapor Middleware
 
-/// Enforces Bearer token authentication when LAN exposure AND key-requirement are both on.
-/// Loopback clients (127.0.0.1, ::1) are always allowed through so local dev is unaffected.
+/// Enforces Bearer token authentication on non-loopback requests when
+/// `SettingsStore.requireAPIKey` is on. Loopback clients (127.0.0.1 / ::1)
+/// always bypass. When LAN exposure is off the server binds to `localhost`
+/// only, so all inbound traffic is loopback and this middleware naturally
+/// no-ops regardless of the `requireAPIKey` flag.
 struct APIKeyAuthMiddleware: AsyncMiddleware {
     func respond(to request: Request, chainingTo next: AsyncResponder) async throws -> Response {
         if Self.isLoopback(request.remoteAddress) {
