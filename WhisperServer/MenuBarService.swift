@@ -16,12 +16,26 @@ final class MenuBarService: ObservableObject {
         case status = 1000
         case server = 1001
         case download = 1002
+        case launchAtLogin = 1003
+        case exposeOnLAN = 1004
+        case lanURL = 1005
+        case lanCopy = 1006
+        case requireAPIKey = 1007
+        case apiKeyCopy = 1008
+        case apiKeyRegenerate = 1009
+        case preferences = 1010
     }
-    
+
+    /// Tags that describe the dynamic LAN sub-section under the Expose toggle (inside Preferences).
+    private static let lanSectionTags: [MenuItemTags] = [
+        .lanURL, .lanCopy, .requireAPIKey, .apiKeyCopy, .apiKeyRegenerate
+    ]
+
     // MARK: - Properties
-    
+
     private var statusItem: NSStatusItem?
     private let modelManager: ModelManager
+    private let settingsStore: SettingsStore
     private weak var serverCoordinator: ServerCoordinator?
     private let idleIconName = "waveform"
     private let processingIconName = "waveform.circle.fill"
@@ -30,10 +44,12 @@ final class MenuBarService: ObservableObject {
     private var baseTooltip = "WhisperServer - Ready"
     private var isCurrentlyProcessing = false
     private let progressResetDelay: TimeInterval = 1.0
+    private var currentServerPort: Int = 12017
     // MARK: - Initialization
     
-    init(modelManager: ModelManager) {
+    init(modelManager: ModelManager, settingsStore: SettingsStore = .shared) {
         self.modelManager = modelManager
+        self.settingsStore = settingsStore
     }
     
     // MARK: - Public Interface
@@ -56,8 +72,9 @@ final class MenuBarService: ObservableObject {
     func updateServerStatus(_ isRunning: Bool, port: Int) {
         guard let menu = statusItem?.menu,
               let serverItem = menu.item(withTag: MenuItemTags.server.rawValue) else { return }
-        
+
         DispatchQueue.main.async {
+            self.currentServerPort = port
             if isRunning {
                 serverItem.title = "Server: Running on port \(port)"
                 serverItem.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
@@ -65,6 +82,7 @@ final class MenuBarService: ObservableObject {
                 serverItem.title = "Server: Stopped"
                 serverItem.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
             }
+            self.refreshLANMenuVisibility()
         }
     }
     
@@ -191,33 +209,163 @@ final class MenuBarService: ObservableObject {
     
     private func createMenu() {
         let menu = NSMenu()
-        
+
         // Server status
         let serverItem = NSMenuItem(title: "Server: Waiting for initialization...", action: nil, keyEquivalent: "")
         serverItem.toolTip = "HTTP server will start after initialization is complete"
         serverItem.tag = MenuItemTags.server.rawValue
         menu.addItem(serverItem)
-        
+
         // Model selection submenu
         menu.addItem(NSMenuItem.separator())
         createModelSelectionMenu(menu)
-        
+
+        // Preferences submenu
+        menu.addItem(NSMenuItem.separator())
+        let preferencesItem = NSMenuItem(title: "Preferences", action: nil, keyEquivalent: "")
+        preferencesItem.tag = MenuItemTags.preferences.rawValue
+        preferencesItem.submenu = buildPreferencesSubmenu()
+        menu.addItem(preferencesItem)
+
         // Quit option
         menu.addItem(NSMenuItem.separator())
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
-#if DEBUG
-        let resetItem = NSMenuItem(title: "Reset Application Data", action: #selector(resetApplicationData(_:)), keyEquivalent: "")
-        resetItem.target = self
-        resetItem.toolTip = "Remove all saved preferences and cached models"
-        menu.addItem(resetItem)
-        print("🔧 Menu items:", menu.items.map { $0.title })
-#endif
-        
+
         statusItem?.menu = menu
     }
     
+    private func buildPreferencesSubmenu() -> NSMenu {
+        let submenu = NSMenu(title: "Preferences")
+
+        let launchItem = NSMenuItem(
+            title: "Launch at Login",
+            action: #selector(toggleLaunchAtLogin(_:)),
+            keyEquivalent: ""
+        )
+        launchItem.target = self
+        launchItem.tag = MenuItemTags.launchAtLogin.rawValue
+        launchItem.state = settingsStore.launchAtLogin ? .on : .off
+        launchItem.toolTip = "Start WhisperServer automatically when you log in"
+        submenu.addItem(launchItem)
+
+        let exposeItem = NSMenuItem(
+            title: "Expose on Local Network",
+            action: #selector(toggleExposeOnLAN(_:)),
+            keyEquivalent: ""
+        )
+        exposeItem.target = self
+        exposeItem.tag = MenuItemTags.exposeOnLAN.rawValue
+        exposeItem.state = settingsStore.exposeOnLAN ? .on : .off
+        exposeItem.toolTip = "Bind the HTTP server to 0.0.0.0 so other devices on your network can reach it"
+        submenu.addItem(exposeItem)
+
+        if settingsStore.exposeOnLAN {
+            appendLANMenuItems(to: submenu)
+        }
+
+#if DEBUG
+        submenu.addItem(NSMenuItem.separator())
+        let resetItem = NSMenuItem(
+            title: "Reset Application Data…",
+            action: #selector(resetApplicationData(_:)),
+            keyEquivalent: ""
+        )
+        resetItem.target = self
+        resetItem.toolTip = "Remove all saved preferences and cached models"
+        submenu.addItem(resetItem)
+#endif
+
+        return submenu
+    }
+
+    private func appendLANMenuItems(to menu: NSMenu) {
+        for item in buildLANSectionItems() { menu.addItem(item) }
+    }
+
+    private func lanURLTitle() -> String {
+        if let ip = NetworkUtility.primaryLocalIPv4() {
+            return "    http://\(ip):\(currentServerPort)"
+        }
+        return "    LAN address unavailable"
+    }
+
+    /// Constructs the LAN sub-section items (order matters).
+    private func buildLANSectionItems() -> [NSMenuItem] {
+        var items: [NSMenuItem] = []
+
+        let urlItem = NSMenuItem(title: lanURLTitle(), action: nil, keyEquivalent: "")
+        urlItem.tag = MenuItemTags.lanURL.rawValue
+        urlItem.isEnabled = false
+        urlItem.toolTip = "Address other devices on your network can use to reach this server"
+        items.append(urlItem)
+
+        let copyURLItem = NSMenuItem(
+            title: "Copy Server URL",
+            action: #selector(copyServerURL(_:)),
+            keyEquivalent: ""
+        )
+        copyURLItem.target = self
+        copyURLItem.tag = MenuItemTags.lanCopy.rawValue
+        items.append(copyURLItem)
+
+        let requireItem = NSMenuItem(
+            title: "Require API Key",
+            action: #selector(toggleRequireAPIKey(_:)),
+            keyEquivalent: ""
+        )
+        requireItem.target = self
+        requireItem.tag = MenuItemTags.requireAPIKey.rawValue
+        requireItem.state = settingsStore.requireAPIKey ? .on : .off
+        requireItem.toolTip = "Reject LAN requests without a valid Authorization: Bearer token"
+        items.append(requireItem)
+
+        if settingsStore.requireAPIKey {
+            let copyKeyItem = NSMenuItem(
+                title: "Copy API Key",
+                action: #selector(copyAPIKey(_:)),
+                keyEquivalent: ""
+            )
+            copyKeyItem.target = self
+            copyKeyItem.tag = MenuItemTags.apiKeyCopy.rawValue
+            items.append(copyKeyItem)
+
+            let regenerateItem = NSMenuItem(
+                title: "Regenerate API Key…",
+                action: #selector(regenerateAPIKey(_:)),
+                keyEquivalent: ""
+            )
+            regenerateItem.target = self
+            regenerateItem.tag = MenuItemTags.apiKeyRegenerate.rawValue
+            items.append(regenerateItem)
+        }
+
+        return items
+    }
+
+    /// Removes and re-creates the LAN sub-section inside the Preferences submenu.
+    private func refreshLANMenuVisibility() {
+        guard let topMenu = statusItem?.menu,
+              let prefItem = topMenu.item(withTag: MenuItemTags.preferences.rawValue),
+              let prefMenu = prefItem.submenu,
+              let exposeIndex = prefMenu.items.firstIndex(where: { $0.tag == MenuItemTags.exposeOnLAN.rawValue }) else { return }
+
+        // Wipe any existing LAN-section items (idempotent, order-insensitive).
+        for tag in Self.lanSectionTags {
+            let index = prefMenu.indexOfItem(withTag: tag.rawValue)
+            if index >= 0 { prefMenu.removeItem(at: index) }
+        }
+
+        guard settingsStore.exposeOnLAN else { return }
+
+        var insertAt = exposeIndex + 1
+        for item in buildLANSectionItems() {
+            prefMenu.insertItem(item, at: insertAt)
+            insertAt += 1
+        }
+    }
+
     private func createModelSelectionMenu(_ parentMenu: NSMenu) {
         let modelSelectionMenuItem = NSMenuItem(title: "Select Model", action: nil, keyEquivalent: "")
         let modelSelectionSubmenu = NSMenu()
@@ -332,6 +480,77 @@ final class MenuBarService: ObservableObject {
         let importItem = NSMenuItem(title: "Import Whisper Model…", action: #selector(importWhisperModel), keyEquivalent: "")
         importItem.target = self
         submenu.addItem(importItem)
+
+        let deleteParent = NSMenuItem(title: "Delete Downloaded Models", action: nil, keyEquivalent: "")
+        deleteParent.submenu = buildDeleteDownloadedModelsSubmenu()
+        submenu.addItem(deleteParent)
+    }
+
+    private func buildDeleteDownloadedModelsSubmenu() -> NSMenu {
+        let submenu = NSMenu(title: "Delete Downloaded Models")
+
+        let revealItem = NSMenuItem(
+            title: "Show in Finder",
+            action: #selector(showModelsInFinder(_:)),
+            keyEquivalent: ""
+        )
+        revealItem.target = self
+        revealItem.toolTip = "Open the folder where model files are stored"
+        if #available(macOS 11.0, *) {
+            revealItem.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Show in Finder")
+        }
+        submenu.addItem(revealItem)
+        submenu.addItem(NSMenuItem.separator())
+
+        let downloadedWhisperIDs = modelManager.downloadedBundledWhisperModelIDs()
+        let fluidDownloaded = modelManager.isFluidModelDownloaded()
+
+        if downloadedWhisperIDs.isEmpty && !fluidDownloaded {
+            let emptyItem = NSMenuItem(title: "No downloaded models", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            submenu.addItem(emptyItem)
+            return submenu
+        }
+
+        if fluidDownloaded {
+            let fluidModel = FluidTranscriptionService.defaultModel
+            let title = "\(fluidModel.displayName) (FluidAudio)"
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(confirmDeleteDownloadedFluid(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = fluidModel.id
+            item.toolTip = "Remove cached FluidAudio model files"
+            if #available(macOS 11.0, *) {
+                item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete Fluid model")
+            }
+            submenu.addItem(item)
+        }
+
+        if !downloadedWhisperIDs.isEmpty && fluidDownloaded {
+            submenu.addItem(NSMenuItem.separator())
+        }
+
+        let whisperEntries = modelManager.availableModels
+            .filter { downloadedWhisperIDs.contains($0.id) }
+        for model in whisperEntries {
+            let item = NSMenuItem(
+                title: model.name,
+                action: #selector(confirmDeleteDownloadedWhisper(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = model.id
+            item.toolTip = "Remove cached files for this Whisper model"
+            if #available(macOS 11.0, *) {
+                item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete Whisper model")
+            }
+            submenu.addItem(item)
+        }
+
+        return submenu
     }
 
     private func addModelMenuItems(for model: Model, to submenu: NSMenu) {
@@ -480,6 +699,75 @@ final class MenuBarService: ObservableObject {
         }
     }
     
+    @objc private func showModelsInFinder(_ sender: NSMenuItem) {
+        guard let dir = modelManager.modelsDirectoryURL else {
+            NSSound.beep()
+            return
+        }
+        // Create the directory if it doesn't exist so Finder has something to open.
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    @objc private func confirmDeleteDownloadedWhisper(_ sender: NSMenuItem) {
+        guard let modelId = sender.representedObject as? String,
+              let model = modelManager.availableModels.first(where: { $0.id == modelId }) else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Delete \"\(model.name)\"?"
+        alert.informativeText = "The downloaded files will be removed. The model will be re-downloaded automatically the next time you use it."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        serverCoordinator?.stopServer()
+        defer { serverCoordinator?.restartServer() }
+
+        do {
+            try modelManager.deleteDownloadedBundledWhisperModel(id: modelId)
+            refreshModelSelectionMenu()
+        } catch {
+            let errorAlert = NSAlert()
+            errorAlert.messageText = "Unable to delete model"
+            errorAlert.informativeText = error.localizedDescription
+            errorAlert.alertStyle = .warning
+            errorAlert.addButton(withTitle: "OK")
+            errorAlert.runModal()
+        }
+    }
+
+    @objc private func confirmDeleteDownloadedFluid(_ sender: NSMenuItem) {
+        let modelName = FluidTranscriptionService.defaultModel.displayName
+
+        let alert = NSAlert()
+        alert.messageText = "Delete \"\(modelName)\"?"
+        alert.informativeText = "The FluidAudio model cache will be removed. It will be re-downloaded automatically the next time you use it."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        serverCoordinator?.stopServer()
+        defer { serverCoordinator?.restartServer() }
+
+        do {
+            try modelManager.deleteDownloadedFluidModel()
+            refreshModelSelectionMenu()
+        } catch {
+            let errorAlert = NSAlert()
+            errorAlert.messageText = "Unable to delete model"
+            errorAlert.informativeText = error.localizedDescription
+            errorAlert.alertStyle = .warning
+            errorAlert.addButton(withTitle: "OK")
+            errorAlert.runModal()
+        }
+    }
+
     @objc private func confirmDeleteModel(_ sender: NSMenuItem) {
         guard let modelId = sender.representedObject as? String,
               let model = modelManager.availableModels.first(where: { $0.id == modelId }) else { return }
@@ -509,6 +797,117 @@ final class MenuBarService: ObservableObject {
         }
     }
     
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        settingsStore.launchAtLogin.toggle()
+        sender.state = settingsStore.launchAtLogin ? .on : .off
+    }
+
+    @objc private func toggleExposeOnLAN(_ sender: NSMenuItem) {
+        let goingOn = !settingsStore.exposeOnLAN
+
+        if goingOn && !settingsStore.lanWarningShown {
+            let alert = NSAlert()
+            alert.messageText = "Expose server on your local network?"
+            alert.informativeText = """
+            Other devices on your network will be able to send requests to the \
+            server while this option is enabled. By default no authentication is \
+            required — enable "Require API Key" below to restrict access.
+
+            macOS may ask you to allow incoming connections the first time.
+            """
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Enable")
+            alert.addButton(withTitle: "Cancel")
+
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            settingsStore.lanWarningShown = true
+        }
+
+        settingsStore.exposeOnLAN = goingOn
+        sender.state = goingOn ? .on : .off
+        refreshLANMenuVisibility()
+
+        serverCoordinator?.restartServer()
+    }
+
+    @objc private func copyServerURL(_ sender: NSMenuItem) {
+        guard let ip = NetworkUtility.primaryLocalIPv4() else {
+            NSSound.beep()
+            return
+        }
+        let url = "http://\(ip):\(currentServerPort)"
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(url, forType: .string)
+    }
+
+    @objc private func toggleRequireAPIKey(_ sender: NSMenuItem) {
+        let goingOn = !settingsStore.requireAPIKey
+
+        if goingOn {
+            let token = APIKeyStore.shared.ensureExists()
+            if !settingsStore.apiKeyWarningShown {
+                let alert = NSAlert()
+                alert.messageText = "API key required for LAN requests"
+                alert.informativeText = """
+                An API key has been generated and stored in your Keychain. \
+                Copy it from the menu (Copy API Key) and include it with every \
+                request as:
+
+                    Authorization: Bearer \(token)
+
+                Requests from this Mac (localhost) are always allowed without \
+                the key.
+                """
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "OK")
+
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+                settingsStore.apiKeyWarningShown = true
+            }
+        }
+
+        settingsStore.requireAPIKey = goingOn
+        sender.state = goingOn ? .on : .off
+        refreshLANMenuVisibility()
+    }
+
+    @objc private func copyAPIKey(_ sender: NSMenuItem) {
+        let token = APIKeyStore.shared.ensureExists()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(token, forType: .string)
+    }
+
+    @objc private func regenerateAPIKey(_ sender: NSMenuItem) {
+        let alert = NSAlert()
+        alert.messageText = "Regenerate API key?"
+        alert.informativeText = """
+        A new key will replace the current one. Any client using the current \
+        key will stop working until you update it.
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Regenerate")
+        alert.addButton(withTitle: "Cancel")
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let fresh = APIKeyStore.shared.regenerate()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(fresh, forType: .string)
+
+        let confirmation = NSAlert()
+        confirmation.messageText = "API key regenerated"
+        confirmation.informativeText = "The new key has been copied to your clipboard."
+        confirmation.alertStyle = .informational
+        confirmation.addButton(withTitle: "OK")
+        confirmation.runModal()
+    }
+
     @objc private func quitApp() {
         NSApp.terminate(self)
     }
