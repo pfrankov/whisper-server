@@ -29,6 +29,11 @@ final class APIKeyStore {
     private let service: String
     private let account = "whisper-api-key"
 
+    /// In-memory cache so middleware doesn't hit `securityd` on every LAN request.
+    /// Populated lazily on first read; refreshed on every successful `save(_:)`.
+    private let cacheLock = NSLock()
+    private var cachedToken: String?
+
     private init() {
         self.service = Bundle.main.bundleIdentifier ?? "pfrankov.WhisperServer"
     }
@@ -46,7 +51,25 @@ final class APIKeyStore {
     }
 
     /// Returns the current key if one is stored, otherwise nil.
+    /// Reads from an in-memory cache after the first Keychain fetch so
+    /// hot request paths don't pay the synchronous IPC round-trip every time.
     func current() -> String? {
+        cacheLock.lock()
+        if let cached = cachedToken {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+
+        guard let token = readFromKeychain() else { return nil }
+
+        cacheLock.lock()
+        cachedToken = token
+        cacheLock.unlock()
+        return token
+    }
+
+    private func readFromKeychain() -> String? {
         var query = baseQuery()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -97,6 +120,12 @@ final class APIKeyStore {
             print("❌ Failed to update API key in Keychain (status \(updateStatus))")
             throw StoreError.keychainFailure(updateStatus)
         }
+
+        // Keychain write succeeded — refresh the in-memory cache so the next
+        // middleware read sees the new token without a Keychain round-trip.
+        cacheLock.lock()
+        cachedToken = token
+        cacheLock.unlock()
     }
 
     private static func generateToken() -> String {

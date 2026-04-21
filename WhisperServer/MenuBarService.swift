@@ -757,8 +757,9 @@ final class MenuBarService: ObservableObject {
         defer { serverCoordinator?.restartServer() }
 
         do {
+            // ModelManager posts .modelManagerDidUpdate; the notification observer
+            // on refreshModelSelectionMenu rebuilds the submenu for us.
             try modelManager.deleteDownloadedBundledWhisperModel(id: modelId)
-            refreshModelSelectionMenu()
         } catch {
             let errorAlert = NSAlert()
             errorAlert.messageText = "Unable to delete model"
@@ -786,8 +787,9 @@ final class MenuBarService: ObservableObject {
         defer { serverCoordinator?.restartServer() }
 
         do {
+            // ModelManager posts .modelManagerDidUpdate; the notification observer
+            // on refreshModelSelectionMenu rebuilds the submenu for us.
             try modelManager.deleteDownloadedFluidModel()
-            refreshModelSelectionMenu()
         } catch {
             let errorAlert = NSAlert()
             errorAlert.messageText = "Unable to delete model"
