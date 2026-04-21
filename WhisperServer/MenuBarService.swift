@@ -544,7 +544,6 @@ final class MenuBarService: ObservableObject {
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = fluidModel.id
             item.toolTip = "Remove cached FluidAudio model files"
             if #available(macOS 11.0, *) {
                 item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete Fluid model")
@@ -729,13 +728,25 @@ final class MenuBarService: ObservableObject {
         }
     }
     
-    @objc private func showModelsInFinder(_ sender: NSMenuItem) {
+    @objc private func showModelsInFinder(_: NSMenuItem) {
         guard let dir = modelManager.modelsDirectoryURL else {
             NSSound.beep()
             return
         }
         // Create the directory if it doesn't exist so Finder has something to open.
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Surface any filesystem failure to the user instead of silently no-oping.
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Unable to open models folder"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
         NSWorkspace.shared.open(dir)
     }
 
@@ -770,7 +781,7 @@ final class MenuBarService: ObservableObject {
         }
     }
 
-    @objc private func confirmDeleteDownloadedFluid(_ sender: NSMenuItem) {
+    @objc private func confirmDeleteDownloadedFluid(_: NSMenuItem) {
         let modelName = FluidTranscriptionService.defaultModel.displayName
 
         let alert = NSAlert()

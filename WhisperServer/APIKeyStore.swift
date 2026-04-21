@@ -160,7 +160,12 @@ struct APIKeyAuthMiddleware: AsyncMiddleware {
             return try await next.respond(to: request)
         }
 
+        // Reject obviously oversized tokens up front so an attacker cannot
+        // push arbitrarily large `Authorization` headers through the full
+        // constant-time compare and waste event-loop cycles. Our tokens are
+        // 67 chars (`ws-` + 64 hex); 128 is a comfortable upper bound.
         guard let bearer = request.headers.bearerAuthorization,
+              bearer.token.utf8.count <= 128,
               let expected = APIKeyStore.shared.current(),
               Self.constantTimeEqual(bearer.token, expected) else {
             throw Abort(.unauthorized, reason: "Missing or invalid API key")
@@ -176,16 +181,20 @@ struct APIKeyAuthMiddleware: AsyncMiddleware {
     }
 
     private static func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {
-        let left = Array(lhs.utf8)
-        let right = Array(rhs.utf8)
-        // Fold the length difference into `diff` and iterate over the longer
-        // of the two buffers so unequal lengths don't short-circuit the compare.
-        let maxCount = max(left.count, right.count)
-        var diff = UInt(left.count ^ right.count)
-        for index in 0..<maxCount {
-            let leftByte = index < left.count ? UInt(left[index]) : 0
-            let rightByte = index < right.count ? UInt(right[index]) : 0
-            diff |= leftByte ^ rightByte
+        // Iterate the UTF-8 views directly — no `Array(...)` copy, so the NIO
+        // event loop doesn't take an attacker-controlled heap allocation per
+        // request. Fold the length difference into `diff` and walk both views
+        // up to `max(count)` so unequal lengths don't short-circuit the compare.
+        let lhsBytes = lhs.utf8
+        let rhsBytes = rhs.utf8
+        let maxCount = max(lhsBytes.count, rhsBytes.count)
+        var diff = UInt(lhsBytes.count ^ rhsBytes.count)
+        var lhsIter = lhsBytes.makeIterator()
+        var rhsIter = rhsBytes.makeIterator()
+        for _ in 0..<maxCount {
+            let lhsByte = UInt(lhsIter.next() ?? 0)
+            let rhsByte = UInt(rhsIter.next() ?? 0)
+            diff |= lhsByte ^ rhsByte
         }
         return diff == 0
     }
