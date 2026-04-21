@@ -115,6 +115,9 @@ final class ModelManager: @unchecked Sendable {
 
     private let fileManager = FileManager.default
     private var modelsDirectory: URL?
+
+    /// Public accessor to the directory where Whisper model files are cached.
+    var modelsDirectoryURL: URL? { modelsDirectory }
     private var userModelsDirectory: URL?
     private var currentDownloadTasks: [URLSessionDownloadTask] = []
     private var urlSession: URLSession!
@@ -500,6 +503,87 @@ final class ModelManager: @unchecked Sendable {
         if removedModelWasSelected, selectedModelID != nil {
             checkAndPrepareSelectedModel()
         }
+    }
+
+    // MARK: - Downloaded Model Inspection & Deletion
+
+    /// Returns the IDs of bundled Whisper models that have any associated on-disk artifact.
+    /// Includes unzipped directories for `.zip` entries so orphaned caches (e.g. the
+    /// encoder bundle left behind after a partial download) are still discoverable
+    /// from "Delete Downloaded Models".
+    func downloadedBundledWhisperModelIDs() -> Set<String> {
+        guard let dir = modelsDirectory else { return [] }
+        var result: Set<String> = []
+        for model in availableModels where !model.id.hasPrefix("user-") {
+            let hasAnyArtifact = model.files.contains { fileInfo in
+                let fileURL = dir.appendingPathComponent(fileInfo.filename)
+                if fileManager.fileExists(atPath: fileURL.path) { return true }
+
+                if fileInfo.type == "zip" {
+                    let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
+                    let unzippedURL = dir.appendingPathComponent(unzippedName)
+                    if fileManager.fileExists(atPath: unzippedURL.path) { return true }
+                }
+
+                return false
+            }
+
+            if hasAnyArtifact {
+                result.insert(model.id)
+            }
+        }
+        return result
+    }
+
+    /// Returns true if the FluidAudio cache directory exists and contains any entries.
+    func isFluidModelDownloaded() -> Bool {
+        let dir = FluidTranscriptionService.cacheDirectory()
+        guard fileManager.fileExists(atPath: dir.path) else { return false }
+        let contents = (try? fileManager.contentsOfDirectory(atPath: dir.path)) ?? []
+        return !contents.isEmpty
+    }
+
+    /// Removes the on-disk files for a bundled Whisper model (no effect on user-imported catalog entries).
+    func deleteDownloadedBundledWhisperModel(id: String) throws {
+        guard let model = availableModels.first(where: { $0.id == id && !$0.id.hasPrefix("user-") }) else {
+            throw ModelDeletionError.modelNotFound(id)
+        }
+        guard let dir = modelsDirectory else {
+            throw ModelPreparationError.modelsDirectoryUnavailable
+        }
+
+        let removeIfExists: (URL) throws -> Void = { url in
+            if self.fileManager.fileExists(atPath: url.path) {
+                do {
+                    try self.fileManager.removeItem(at: url)
+                } catch {
+                    throw ModelDeletionError.fileRemovalFailed(path: url.path, underlying: error)
+                }
+            }
+        }
+
+        for fileInfo in model.files {
+            try removeIfExists(dir.appendingPathComponent(fileInfo.filename))
+
+            if fileInfo.type == "zip" {
+                let unzippedName = (fileInfo.filename as NSString).deletingPathExtension
+                try removeIfExists(dir.appendingPathComponent(unzippedName))
+            }
+        }
+
+        if selectedModelID == id {
+            WhisperTranscriptionService.reinitializeContext()
+        }
+        NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
+    }
+
+    /// Removes the FluidAudio model cache directory. The model will re-download on next use.
+    func deleteDownloadedFluidModel() throws {
+        let dir = FluidTranscriptionService.cacheDirectory()
+        guard fileManager.fileExists(atPath: dir.path) else { return }
+        do { try fileManager.removeItem(at: dir) }
+        catch { throw ModelDeletionError.fileRemovalFailed(path: dir.path, underlying: error) }
+        NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
     }
 
     // MARK: - Model Preparation (Checking & Downloading) - To be implemented
