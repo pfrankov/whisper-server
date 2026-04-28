@@ -223,6 +223,33 @@ Streaming:
 - Streaming sends one JSON chunk with `speaker_segments` when diarization completes.
 - Then the standard `end` event is sent.
 
+## Preferences
+
+Toggles available from the menu bar:
+
+- **Launch at Login** — registers WhisperServer as a login item via `SMAppService`, so the server starts automatically when you sign in. You can also revoke this from *System Settings → General → Login Items*.
+- **Expose on Local Network** — binds the HTTP server to `0.0.0.0:12017` instead of `localhost`, so other devices on your LAN (phone, another Mac) can reach the API. When enabled, the menu shows the full URL (e.g. `http://192.168.1.42:12017`) and offers a *Copy Server URL* action.
+- **Require API Key** — appears under the LAN URL when LAN exposure is on. When enabled, LAN clients must present a bearer token; requests from this Mac (`127.0.0.1` / `::1`) always bypass the check so local tooling keeps working.
+
+### API key authentication
+
+When *Require API Key* is on for the first time, WhisperServer generates a random key (`ws-` prefix + 64 hex chars) and stores it in the macOS Keychain. Clients must send it in the `Authorization` header:
+
+```bash
+curl -X POST http://192.168.1.42:12017/v1/audio/transcriptions \
+  -H "Authorization: Bearer ws-<your-key>" \
+  -F file=@audio.wav
+```
+
+The menu exposes two actions while the toggle is on:
+
+- **Copy API Key** — copies the current key to the clipboard.
+- **Regenerate API Key…** — replaces the key; any existing clients stop working until they receive the new value. The new key is copied to your clipboard automatically.
+
+Turning *Require API Key* off (or turning LAN exposure off entirely) does not delete the key — it stays in the Keychain so the same key works when you re-enable the toggle.
+
+> On first connection, macOS may show a prompt asking you to allow incoming connections for WhisperServer — that's the macOS Application Firewall, unrelated to the app itself.
+
 ## Build from Source
 If you want to build WhisperServer yourself:
 

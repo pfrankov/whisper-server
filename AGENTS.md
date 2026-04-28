@@ -33,7 +33,9 @@
 - PRs: clear description, scope of change, testing steps (`xcodebuild build`, `./test_api.sh` results), linked issues, and screenshots if UI/menu-bar behavior changes.
 
 ## Security & Configuration Tips
-- Default port is `12017`; avoid exposing beyond localhost in development.
+- Default port is `12017`. The server binds to `localhost` by default; users can opt in to `0.0.0.0` via the "Expose on Local Network" menu bar toggle.
+- LAN requests may optionally require a bearer token via the "Require API Key" toggle. Tokens live in `APIKeyStore` (Keychain-backed, service = bundle id, account = `whisper-api-key`). `APIKeyAuthMiddleware` enforces the check at the Vapor layer; loopback clients (127.0.0.1 / ::1) always bypass to keep local tooling working.
+- User preferences (launch-at-login, LAN exposure, require-API-key) live in `SettingsStore` and are persisted via `UserDefaults`. Launch-at-login uses `SMAppService.mainApp` (no helper target).
 - Large Whisper models live outside the repo; configure via the app UI; never commit model files.
 
 ## Platform Assumptions
