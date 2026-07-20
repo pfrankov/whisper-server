@@ -10,6 +10,15 @@ class WhisperContextManager {
     /// Shared context and lock for thread-safe access
     private static var sharedContext: OpaquePointer?
     private static let lock = NSLock()
+
+    /// Number of transcription operations currently using the shared context.
+    /// While non-zero the shared context must never be freed: whisper_full may
+    /// still be running on it outside the lock.
+    private static var activeUseCount = 0
+
+    /// Set when a free was requested (inactivity timeout or model switch) while
+    /// the context was in use; the free is performed by the last releaseContext().
+    private static var pendingFree = false
     private static let logQueue = DispatchQueue(label: "com.whisperserver.whisper.log", qos: .utility)
     private static var isLoggingConfigured = false
 
@@ -54,15 +63,54 @@ class WhisperContextManager {
     private static func checkAndReleaseResources() {
         let currentTime = Date()
         let elapsedTime = currentTime.timeIntervalSince(lastActivityTime)
-        
+
         if elapsedTime >= inactivityTimeout {
             lock.lock(); defer { lock.unlock() }
 
-            if let ctx = sharedContext {
-                whisper_free(ctx)
-                sharedContext = nil
-            }
+            // A transcription is still running on the context; freeing it now
+            // would be a use-after-free. releaseContext() restarts the timer.
+            guard activeUseCount == 0 else { return }
+
+            freeSharedContextUnsafe()
         }
+    }
+
+    /// Frees the shared context. This function MUST be called from within the lock.
+    private static func freeSharedContextUnsafe() {
+        if let ctx = sharedContext {
+            whisper_free(ctx)
+            sharedContext = nil
+        }
+    }
+
+    /// Acquires the shared context for a transcription operation and marks it as
+    /// in use so it cannot be freed until the matching releaseContext() call.
+    /// - Parameter modelPaths: The paths to the model files.
+    /// - Returns: An `OpaquePointer` to the Whisper context, or `nil` on failure.
+    static func acquireContext(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
+        lock.lock(); defer { lock.unlock() }
+
+        resetInactivityTimer()
+
+        guard let context = getOrCreateContextUnsafe(modelPaths: modelPaths) else {
+            return nil
+        }
+        activeUseCount += 1
+        return context
+    }
+
+    /// Releases a context previously obtained via acquireContext(). Performs any
+    /// free that was deferred while the context was in use and restarts the
+    /// inactivity countdown from the end of the operation.
+    static func releaseContext() {
+        lock.lock(); defer { lock.unlock() }
+
+        activeUseCount = max(0, activeUseCount - 1)
+        if activeUseCount == 0 && pendingFree {
+            pendingFree = false
+            freeSharedContextUnsafe()
+        }
+        resetInactivityTimer()
     }
     
     /// Configures a persistent Metal shader cache
@@ -115,10 +163,12 @@ class WhisperContextManager {
     static func reinitializeContext() {
         lock.lock(); defer { lock.unlock() }
 
-        // First, free the current context if it exists
-        if let ctx = sharedContext {
-            whisper_free(ctx)
-            sharedContext = nil
+        // Free the current context, or defer the free if a transcription is
+        // still running on it (the last releaseContext() will perform it).
+        if activeUseCount > 0 {
+            pendingFree = true
+        } else {
+            freeSharedContextUnsafe()
         }
 
         // The context will be re-initialized on the next call to getOrCreateContext
