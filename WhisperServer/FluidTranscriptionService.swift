@@ -126,7 +126,7 @@ struct FluidTranscriptionService {
         do {
             let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
             let asrManager = AsrManager(config: .default)
-            try await asrManager.initialize(models: models)
+            try await asrManager.loadModels(models)
 
             guard let asrResult = try await runTranscription(using: asrManager, audioURL: audioURL) else {
                 return nil
@@ -155,7 +155,7 @@ struct FluidTranscriptionService {
         do {
             let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
             let asrManager = AsrManager(config: .default)
-            try await asrManager.initialize(models: models)
+            try await asrManager.loadModels(models)
 
             guard let asrResult = try await runTranscription(using: asrManager, audioURL: audioURL) else {
                 return nil
@@ -212,12 +212,14 @@ struct FluidTranscriptionService {
             let samples = WhisperAudioConverter.convertToWhisperFormat(from: audioURL),
             !samples.isEmpty
         {
-            let sampleResult = try await asrManager.transcribe(samples, source: .system)
+            var sampleState = try TdtDecoderState()
+            let sampleResult = try await asrManager.transcribe(samples, decoderState: &sampleState)
             if extractTrimmedText(from: sampleResult) != nil {
                 if !(sampleResult.tokenTimings?.isEmpty ?? true) {
                     return sampleResult
                 }
-                let directResult = try await asrManager.transcribe(audioURL, source: .system)
+                var directState = try TdtDecoderState()
+                let directResult = try await asrManager.transcribe(audioURL, decoderState: &directState)
                 if let directTrimmed = extractTrimmedText(from: directResult) {
                     if !(directResult.tokenTimings?.isEmpty ?? true) {
                         return directResult
@@ -229,7 +231,8 @@ struct FluidTranscriptionService {
             }
         }
 
-        let fileResult = try await asrManager.transcribe(audioURL, source: .system)
+        var fileState = try TdtDecoderState()
+        let fileResult = try await asrManager.transcribe(audioURL, decoderState: &fileState)
         guard extractTrimmedText(from: fileResult) != nil else { return nil }
         return fileResult
     }
