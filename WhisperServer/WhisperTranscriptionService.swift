@@ -456,22 +456,25 @@ struct WhisperTranscriptionService {
                                        prompt: String?,
                                        modelPaths: (binPath: URL, encoderDir: URL)?) -> String? {
 
-        // Get context for this chunk
+        // Get context for this chunk. The shared context is acquired (not just
+        // fetched) so the inactivity timer cannot free it mid-inference.
         let context: OpaquePointer?
         if resetContextBetweenChunks {
             context = WhisperContextManager.createIsolatedContext(modelPaths: modelPaths)
         } else {
-            context = WhisperContextManager.getOrCreateContext(modelPaths: modelPaths)
+            context = WhisperContextManager.acquireContext(modelPaths: modelPaths)
         }
         guard let ctx = context else { return nil }
-        
+
         defer {
-            // Clean up isolated context
-            if resetContextBetweenChunks, let ctx = context {
+            if resetContextBetweenChunks {
+                // Clean up isolated context
                 whisper_free(ctx)
+            } else {
+                WhisperContextManager.releaseContext()
             }
         }
-        
+
         // Configure parameters
         var (params, langPtr, promptPtr) = makeWhisperParams(printTimestamps: false, language: language, prompt: prompt)
 
@@ -512,22 +515,25 @@ struct WhisperTranscriptionService {
                                                  prompt: String?, 
                                                  modelPaths: (binPath: URL, encoderDir: URL)?) -> [TranscriptionSegment]? {
         
-        // Get context for this chunk
+        // Get context for this chunk. The shared context is acquired (not just
+        // fetched) so the inactivity timer cannot free it mid-inference.
         let context: OpaquePointer?
         if resetContextBetweenChunks {
             context = WhisperContextManager.createIsolatedContext(modelPaths: modelPaths)
         } else {
-            context = WhisperContextManager.getOrCreateContext(modelPaths: modelPaths)
+            context = WhisperContextManager.acquireContext(modelPaths: modelPaths)
         }
         guard let ctx = context else { return nil }
-        
+
         defer {
-            // Clean up isolated context
-            if resetContextBetweenChunks, let ctx = context {
+            if resetContextBetweenChunks {
+                // Clean up isolated context
                 whisper_free(ctx)
+            } else {
+                WhisperContextManager.releaseContext()
             }
         }
-        
+
         // Configure parameters
         var (params, langPtr, promptPtr) = makeWhisperParams(printTimestamps: true, language: language, prompt: prompt)
 

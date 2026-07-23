@@ -343,7 +343,7 @@ final class VaporServer {
                 )
             }
 
-            let fluidDefaultModelID = FluidTranscriptionService.defaultModel.id
+            let fluidDefaultModelID = self.modelManager.selectedFluidModelDescriptor.id
             let fluidModels = FluidTranscriptionService.availableModels.map { descriptor -> APIModelResource in
                 let aliasCandidates = descriptor.allIdentifiers.filter { $0.caseInsensitiveCompare(descriptor.id) != .orderedSame }
                 let aliases = aliasCandidates.isEmpty ? nil : aliasCandidates
@@ -481,7 +481,7 @@ final class VaporServer {
             var fluidLanguage = whisperReq.language
             if provider == .fluid {
                 if fluidModelDescriptor == nil {
-                    fluidModelDescriptor = FluidTranscriptionService.defaultModel
+                    fluidModelDescriptor = self.modelManager.selectedFluidModelDescriptor
                 }
             }
 
@@ -490,7 +490,8 @@ final class VaporServer {
                 case .whisper:
                     return self.modelManager.selectedModelName
                 case .fluid:
-                    return fluidModelDescriptor?.displayName ?? FluidTranscriptionService.defaultModel.displayName
+                    return fluidModelDescriptor?.displayName
+                        ?? self.modelManager.selectedFluidModelDescriptor.displayName
                 }
             }()
 
@@ -694,7 +695,7 @@ final class VaporServer {
                         case .fluid:
                             // Do the work asynchronously, then emit a single chunk
                             Task {
-                            let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                            let descriptor = fluidModelDescriptor ?? self.modelManager.selectedFluidModelDescriptor
                             let activeModelName = progressModelName ?? descriptor.displayName
                             let progressTracker = ProgressTracker(modelName: activeModelName)
                             let selectedLanguage = fluidLanguage
@@ -803,7 +804,7 @@ final class VaporServer {
                             contentType = self.contentType(for: .json)
                         }
                     case .fluid:
-                        let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                        let descriptor = fluidModelDescriptor ?? self.modelManager.selectedFluidModelDescriptor
                         let activeModelName = progressModelName ?? descriptor.displayName
                         let progressTracker = ProgressTracker(modelName: activeModelName)
 
@@ -872,7 +873,7 @@ final class VaporServer {
                             contentType = self.contentType(for: .json)
                         }
                     case .fluid:
-                        let descriptor = fluidModelDescriptor ?? FluidTranscriptionService.defaultModel
+                        let descriptor = fluidModelDescriptor ?? self.modelManager.selectedFluidModelDescriptor
                         let activeModelName = progressModelName ?? descriptor.displayName
                         let progressTracker = ProgressTracker(modelName: activeModelName)
                         

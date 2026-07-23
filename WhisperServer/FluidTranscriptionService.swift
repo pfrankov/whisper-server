@@ -67,6 +67,19 @@ struct FluidTranscriptionService {
             id: "parakeet-tdt-0.6b-v3",
             displayName: "Parakeet TDT v3 (0.6B)",
             aliases: ["default", "fluid-default", "parakeet-tdt-0.6b-v3-coreml"]
+        ),
+        ModelDescriptor(
+            id: "nemotron-speech-streaming-en-0.6b",
+            displayName: "Nemotron Streaming EN (0.6B)",
+            aliases: ["nemotron", "nemotron-en", "nemotron-streaming-en", "nemotron-speech-streaming-en-0.6b-coreml"]
+        ),
+        ModelDescriptor(
+            id: "nemotron-3.5-asr-streaming-multilingual-0.6b",
+            displayName: "Nemotron 3.5 Streaming Multilingual (0.6B)",
+            aliases: [
+                "nemotron-multilingual", "nemotron-3.5", "nemotron-3.5-asr",
+                "nemotron-3.5-asr-streaming-multilingual-0.6b-coreml"
+            ]
         )
     ]
 
@@ -119,14 +132,17 @@ struct FluidTranscriptionService {
     /// - Returns: Recognized text, or nil on failure
     static func transcribeText(
         at audioURL: URL,
-        language _: String?,
-        model _: ModelDescriptor = FluidTranscriptionService.defaultModel
+        language: String?,
+        model: ModelDescriptor = FluidTranscriptionService.defaultModel
     ) async -> String? {
-        // TODO: Apply model selection when FluidAudio API supports it
+        if let variant = NemotronTranscriptionService.variant(forModelID: model.id) {
+            return await NemotronTranscriptionService.transcribeText(
+                at: audioURL, language: language, variant: variant)
+        }
         do {
             let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
             let asrManager = AsrManager(config: .default)
-            try await asrManager.initialize(models: models)
+            try await asrManager.loadModels(models)
 
             guard let asrResult = try await runTranscription(using: asrManager, audioURL: audioURL) else {
                 return nil
@@ -146,16 +162,19 @@ struct FluidTranscriptionService {
     /// - Returns: A structured transcription result, or nil when recognition fails.
     static func transcribeAudio(
         at audioURL: URL,
-        language _: String?,
-        model _: ModelDescriptor = FluidTranscriptionService.defaultModel,
+        language: String?,
+        model: ModelDescriptor = FluidTranscriptionService.defaultModel,
         includeDiarization: Bool = false
     ) async -> TranscriptionResult? {
-        // TODO: Apply model selection when FluidAudio API supports it
-        // Currently AsrModels.downloadAndLoad() uses the default model without allowing selection
+        if let variant = NemotronTranscriptionService.variant(forModelID: model.id) {
+            return await NemotronTranscriptionService.transcribeAudio(
+                at: audioURL, language: language, variant: variant,
+                includeDiarization: includeDiarization)
+        }
         do {
             let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
             let asrManager = AsrManager(config: .default)
-            try await asrManager.initialize(models: models)
+            try await asrManager.loadModels(models)
 
             guard let asrResult = try await runTranscription(using: asrManager, audioURL: audioURL) else {
                 return nil
@@ -212,12 +231,14 @@ struct FluidTranscriptionService {
             let samples = WhisperAudioConverter.convertToWhisperFormat(from: audioURL),
             !samples.isEmpty
         {
-            let sampleResult = try await asrManager.transcribe(samples, source: .system)
+            var sampleState = try TdtDecoderState()
+            let sampleResult = try await asrManager.transcribe(samples, decoderState: &sampleState)
             if extractTrimmedText(from: sampleResult) != nil {
                 if !(sampleResult.tokenTimings?.isEmpty ?? true) {
                     return sampleResult
                 }
-                let directResult = try await asrManager.transcribe(audioURL, source: .system)
+                var directState = try TdtDecoderState()
+                let directResult = try await asrManager.transcribe(audioURL, decoderState: &directState)
                 if let directTrimmed = extractTrimmedText(from: directResult) {
                     if !(directResult.tokenTimings?.isEmpty ?? true) {
                         return directResult
@@ -229,12 +250,13 @@ struct FluidTranscriptionService {
             }
         }
 
-        let fileResult = try await asrManager.transcribe(audioURL, source: .system)
+        var fileState = try TdtDecoderState()
+        let fileResult = try await asrManager.transcribe(audioURL, decoderState: &fileState)
         guard extractTrimmedText(from: fileResult) != nil else { return nil }
         return fileResult
     }
 
-    private static func runDiarization(
+    static func runDiarization(
         for audioURL: URL,
         tokenTimings: [TokenTiming],
         fallbackText: String,
@@ -280,7 +302,9 @@ struct FluidTranscriptionService {
     private static func normalizeSegmentText(_ raw: String) -> String {
         guard !raw.isEmpty else { return "" }
 
-        var normalized = raw.replacingOccurrences(of: "\n", with: " ")
+        // SentencePiece word markers from the Nemotron multilingual tokenizer
+        var normalized = raw.replacingOccurrences(of: "\u{2581}", with: " ")
+        normalized = normalized.replacingOccurrences(of: "\n", with: " ")
         normalized = normalized.replacingOccurrences(
             of: whitespacePattern,
             with: " ",
@@ -307,7 +331,7 @@ struct FluidTranscriptionService {
         return normalized
     }
 
-    private static func buildSegments(
+    static func buildSegments(
         from tokenTimings: [TokenTiming],
         fallbackText: String,
         duration: TimeInterval
