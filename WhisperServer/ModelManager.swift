@@ -94,6 +94,21 @@ final class ModelManager: @unchecked Sendable {
             if !suppressAutoPrepare { checkAndPrepareSelectedModel() }
         }
     }
+
+    /// Which FluidAudio-served model (Parakeet or Nemotron) is active when
+    /// `selectedProvider == .fluid`.
+    @Published private(set) var selectedFluidModelID: String = FluidTranscriptionService.defaultModel.id {
+        didSet {
+            UserDefaults.standard.set(selectedFluidModelID, forKey: "selectedFluidModelID")
+            NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
+            if !suppressAutoPrepare { checkAndPrepareSelectedModel() }
+        }
+    }
+
+    var selectedFluidModelDescriptor: FluidTranscriptionService.ModelDescriptor {
+        FluidTranscriptionService.modelDescriptor(for: selectedFluidModelID)
+            ?? FluidTranscriptionService.defaultModel
+    }
     
     /// Name of the selected model for UI display and logging
     var selectedModelName: String? {
@@ -135,6 +150,10 @@ final class ModelManager: @unchecked Sendable {
         setupModelsDirectory()
         loadModelDefinitions()
         selectedModelID = UserDefaults.standard.string(forKey: "selectedModelID") ?? availableModels.first?.id
+        if let fluidID = UserDefaults.standard.string(forKey: "selectedFluidModelID"),
+           FluidTranscriptionService.modelDescriptor(for: fluidID) != nil {
+            selectedFluidModelID = fluidID
+        }
         if let providerRaw = UserDefaults.standard.string(forKey: "selectedProvider"),
            let provider = Provider(rawValue: providerRaw) {
             selectedProvider = provider
@@ -161,6 +180,16 @@ final class ModelManager: @unchecked Sendable {
 
     func selectProvider(_ provider: Provider) {
         selectedProvider = provider
+    }
+
+    /// Selects a FluidAudio-served model (Parakeet or Nemotron) and switches to the fluid provider.
+    func selectFluidModel(id: String) {
+        guard let descriptor = FluidTranscriptionService.modelDescriptor(for: id) else { return }
+        suppressAutoPrepare = true
+        selectedFluidModelID = descriptor.id
+        selectedProvider = .fluid
+        suppressAutoPrepare = false
+        checkAndPrepareSelectedModel()
     }
 
 #if DEBUG
@@ -577,12 +606,22 @@ final class ModelManager: @unchecked Sendable {
         NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
     }
 
-    /// Removes the FluidAudio model cache directory. The model will re-download on next use.
+    /// Returns true if any Nemotron model cache directory contains downloaded files.
+    func isNemotronModelDownloaded() -> Bool {
+        NemotronTranscriptionService.isModelDownloaded(.english)
+            || NemotronTranscriptionService.isModelDownloaded(.multilingual)
+    }
+
+    /// Removes the FluidAudio model caches (Parakeet and Nemotron). Models re-download on next use.
     func deleteDownloadedFluidModel() throws {
-        let dir = FluidTranscriptionService.cacheDirectory()
-        guard fileManager.fileExists(atPath: dir.path) else { return }
-        do { try fileManager.removeItem(at: dir) }
-        catch { throw ModelDeletionError.fileRemovalFailed(path: dir.path, underlying: error) }
+        var directories = [FluidTranscriptionService.cacheDirectory()]
+        directories.append(NemotronTranscriptionService.cacheDirectory(for: .english))
+        directories.append(NemotronTranscriptionService.cacheDirectory(for: .multilingual))
+
+        for dir in directories where fileManager.fileExists(atPath: dir.path) {
+            do { try fileManager.removeItem(at: dir) }
+            catch { throw ModelDeletionError.fileRemovalFailed(path: dir.path, underlying: error) }
+        }
         NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
     }
 
@@ -600,17 +639,29 @@ final class ModelManager: @unchecked Sendable {
             currentStatus = "Preparing FluidAudio model..."
             downloadProgress = nil
 
+            let fluidModelID = selectedFluidModelID
             fluidPreparationTask = Task { [weak self] in
                 guard let self = self else { return }
                 do {
-                    let cacheDir = FluidTranscriptionService.cacheDirectory()
-                    do {
-                        try self.fileManager.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: nil)
-                    } catch {
-                        print("⚠️ Unable to ensure FluidAudio cache directory: \(error.localizedDescription)")
-                    }
                     try Task.checkCancellation()
-                    _ = try await AsrModels.downloadAndLoad(to: cacheDir)
+                    if let variant = NemotronTranscriptionService.variant(forModelID: fluidModelID) {
+                        let baseDir = NemotronTranscriptionService.cacheBaseDirectory()
+                        switch variant {
+                        case .english:
+                            try await ModelHub.download(NemotronChunkSize.ms2240.repo, to: baseDir)
+                        case .multilingual:
+                            _ = try await StreamingNemotronMultilingualAsrManager.downloadVariant(
+                                languageCode: "auto", chunkMs: 2240, to: baseDir)
+                        }
+                    } else {
+                        let cacheDir = FluidTranscriptionService.cacheDirectory()
+                        do {
+                            try self.fileManager.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: nil)
+                        } catch {
+                            print("⚠️ Unable to ensure FluidAudio cache directory: \(error.localizedDescription)")
+                        }
+                        _ = try await AsrModels.downloadAndLoad(to: cacheDir)
+                    }
                     try Task.checkCancellation()
                     await MainActor.run {
                         self.currentStatus = "FluidAudio model ready"

@@ -67,6 +67,19 @@ struct FluidTranscriptionService {
             id: "parakeet-tdt-0.6b-v3",
             displayName: "Parakeet TDT v3 (0.6B)",
             aliases: ["default", "fluid-default", "parakeet-tdt-0.6b-v3-coreml"]
+        ),
+        ModelDescriptor(
+            id: "nemotron-speech-streaming-en-0.6b",
+            displayName: "Nemotron Streaming EN (0.6B)",
+            aliases: ["nemotron", "nemotron-en", "nemotron-streaming-en", "nemotron-speech-streaming-en-0.6b-coreml"]
+        ),
+        ModelDescriptor(
+            id: "nemotron-3.5-asr-streaming-multilingual-0.6b",
+            displayName: "Nemotron 3.5 Streaming Multilingual (0.6B)",
+            aliases: [
+                "nemotron-multilingual", "nemotron-3.5", "nemotron-3.5-asr",
+                "nemotron-3.5-asr-streaming-multilingual-0.6b-coreml"
+            ]
         )
     ]
 
@@ -119,10 +132,13 @@ struct FluidTranscriptionService {
     /// - Returns: Recognized text, or nil on failure
     static func transcribeText(
         at audioURL: URL,
-        language _: String?,
-        model _: ModelDescriptor = FluidTranscriptionService.defaultModel
+        language: String?,
+        model: ModelDescriptor = FluidTranscriptionService.defaultModel
     ) async -> String? {
-        // TODO: Apply model selection when FluidAudio API supports it
+        if let variant = NemotronTranscriptionService.variant(forModelID: model.id) {
+            return await NemotronTranscriptionService.transcribeText(
+                at: audioURL, language: language, variant: variant)
+        }
         do {
             let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
             let asrManager = AsrManager(config: .default)
@@ -146,12 +162,15 @@ struct FluidTranscriptionService {
     /// - Returns: A structured transcription result, or nil when recognition fails.
     static func transcribeAudio(
         at audioURL: URL,
-        language _: String?,
-        model _: ModelDescriptor = FluidTranscriptionService.defaultModel,
+        language: String?,
+        model: ModelDescriptor = FluidTranscriptionService.defaultModel,
         includeDiarization: Bool = false
     ) async -> TranscriptionResult? {
-        // TODO: Apply model selection when FluidAudio API supports it
-        // Currently AsrModels.downloadAndLoad() uses the default model without allowing selection
+        if let variant = NemotronTranscriptionService.variant(forModelID: model.id) {
+            return await NemotronTranscriptionService.transcribeAudio(
+                at: audioURL, language: language, variant: variant,
+                includeDiarization: includeDiarization)
+        }
         do {
             let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
             let asrManager = AsrManager(config: .default)
@@ -237,7 +256,7 @@ struct FluidTranscriptionService {
         return fileResult
     }
 
-    private static func runDiarization(
+    static func runDiarization(
         for audioURL: URL,
         tokenTimings: [TokenTiming],
         fallbackText: String,
@@ -310,7 +329,7 @@ struct FluidTranscriptionService {
         return normalized
     }
 
-    private static func buildSegments(
+    static func buildSegments(
         from tokenTimings: [TokenTiming],
         fallbackText: String,
         duration: TimeInterval
