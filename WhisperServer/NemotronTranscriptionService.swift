@@ -19,9 +19,10 @@ struct NemotronTranscriptionService {
     /// default: highest throughput at no accuracy cost vs the smaller tiers.
     private static let chunkMs = 2240
     private static let sampleRate = 16_000
-    /// Samples fed per `process` call (~22.4 s = 10 model chunks) to bound peak
-    /// per-call buffer size on long files.
-    private static let feedSliceSamples = 358_400
+    /// Samples fed per `process` call: exactly one 2240 ms model chunk (35 840
+    /// samples @ 16 kHz). The streaming managers accumulate partial text per
+    /// call; feeding multiple chunks per call can drop early-chunk text.
+    private static let feedSliceSamples = 35_840
 
     static func variant(forModelID id: String) -> Variant? {
         let normalized = id.lowercased()
@@ -134,6 +135,14 @@ struct NemotronTranscriptionService {
         return (result.text, result.timings)
     }
 
+    /// The multilingual model's cache-aware encoder needs left context before it
+    /// starts emitting tokens: speech in the first ~2 chunks of a session is
+    /// dropped otherwise (verified against FluidAudio's own CLI). For batch files
+    /// we prime the session with 2 chunks of leading silence and flush the tail
+    /// with 1 more, then shift token timings back by the lead-in.
+    private static let multilingualLeadPadChunks = 2
+    private static let multilingualTailPadChunks = 1
+
     private static func transcribeMultilingual(
         samples: [Float],
         language: String?
@@ -149,12 +158,27 @@ struct NemotronTranscriptionService {
         try await manager.loadModels(from: variantDir)
         await manager.setLanguage(languageCode)
 
-        for slice in sampleSlices(samples) {
+        let chunkSamples = chunkMs * sampleRate / 1000
+        let leadPad = [Float](repeating: 0, count: multilingualLeadPadChunks * chunkSamples)
+        let tailPad = [Float](repeating: 0, count: multilingualTailPadChunks * chunkSamples)
+
+        for slice in sampleSlices(leadPad + samples + tailPad) {
             _ = try await manager.process(samples: Array(slice))
         }
         let result = try await manager.finishWithTokenTimings()
         await manager.cleanup()
-        return (result.text, result.timings)
+
+        let leadPadSeconds = TimeInterval(leadPad.count) / TimeInterval(sampleRate)
+        let shifted = result.timings.map { timing in
+            TokenTiming(
+                token: timing.token,
+                tokenId: timing.tokenId,
+                startTime: max(0, timing.startTime - leadPadSeconds),
+                endTime: max(0, timing.endTime - leadPadSeconds),
+                confidence: timing.confidence
+            )
+        }
+        return (result.text, shifted)
     }
 
     // MARK: - Helpers

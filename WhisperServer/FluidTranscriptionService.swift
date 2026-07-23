@@ -302,7 +302,9 @@ struct FluidTranscriptionService {
     private static func normalizeSegmentText(_ raw: String) -> String {
         guard !raw.isEmpty else { return "" }
 
-        var normalized = raw.replacingOccurrences(of: "\n", with: " ")
+        // SentencePiece word markers from the Nemotron multilingual tokenizer
+        var normalized = raw.replacingOccurrences(of: "\u{2581}", with: " ")
+        normalized = normalized.replacingOccurrences(of: "\n", with: " ")
         normalized = normalized.replacingOccurrences(
             of: whitespacePattern,
             with: " ",
