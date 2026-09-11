@@ -439,7 +439,7 @@ final class MenuBarService: ObservableObject {
         }
 
         if modelManager.selectedProvider == .fluid {
-            return FluidTranscriptionService.defaultModel.displayName
+            return modelManager.selectedFluidModelDescriptor.displayName
         }
 
         return modelManager.selectedModelName ?? "Selected model"
@@ -483,10 +483,18 @@ final class MenuBarService: ObservableObject {
         #if DEBUG
         print("🔧 populateModelSelectionSubmenu provider:", modelManager.selectedProvider)
         #endif
-        let fluidItem = NSMenuItem(title: "FluidAudio (Core ML)", action: #selector(selectFluidProvider), keyEquivalent: "")
-        fluidItem.target = self
-        fluidItem.state = (modelManager.selectedProvider == .fluid) ? .on : .off
-        submenu.addItem(fluidItem)
+        for descriptor in FluidTranscriptionService.availableModels {
+            let fluidItem = NSMenuItem(
+                title: "\(descriptor.displayName) (Core ML)",
+                action: #selector(selectFluidModel(_:)),
+                keyEquivalent: ""
+            )
+            fluidItem.target = self
+            fluidItem.representedObject = descriptor.id
+            fluidItem.state = (modelManager.selectedProvider == .fluid
+                && modelManager.selectedFluidModelDescriptor.id == descriptor.id) ? .on : .off
+            submenu.addItem(fluidItem)
+        }
         submenu.addItem(NSMenuItem.separator())
 
         if modelManager.availableModels.isEmpty {
@@ -526,7 +534,7 @@ final class MenuBarService: ObservableObject {
         submenu.addItem(NSMenuItem.separator())
 
         let downloadedWhisperIDs = modelManager.downloadedBundledWhisperModelIDs()
-        let fluidDownloaded = modelManager.isFluidModelDownloaded()
+        let fluidDownloaded = modelManager.isFluidModelDownloaded() || modelManager.isNemotronModelDownloaded()
 
         if downloadedWhisperIDs.isEmpty && !fluidDownloaded {
             let emptyItem = NSMenuItem(title: "No downloaded models", action: nil, keyEquivalent: "")
@@ -536,15 +544,13 @@ final class MenuBarService: ObservableObject {
         }
 
         if fluidDownloaded {
-            let fluidModel = FluidTranscriptionService.defaultModel
-            let title = "\(fluidModel.displayName) (FluidAudio)"
             let item = NSMenuItem(
-                title: title,
+                title: "FluidAudio models (Parakeet/Nemotron)",
                 action: #selector(confirmDeleteDownloadedFluid(_:)),
                 keyEquivalent: ""
             )
             item.target = self
-            item.toolTip = "Remove cached FluidAudio model files"
+            item.toolTip = "Remove cached FluidAudio model files (Parakeet and Nemotron)"
             if #available(macOS 11.0, *) {
                 item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete Fluid model")
             }
@@ -669,9 +675,21 @@ final class MenuBarService: ObservableObject {
         }
     }
     
+    @objc private func selectFluidModel(_ sender: NSMenuItem) {
+        guard let modelID = sender.representedObject as? String else { return }
+        guard modelManager.selectedProvider != .fluid
+            || modelManager.selectedFluidModelDescriptor.id != modelID else { return }
+
+        print("🔄 Switching engine to FluidAudio model \(modelID)")
+        serverCoordinator?.stopServer()
+        modelManager.selectFluidModel(id: modelID)
+        refreshModelSelectionMenu()
+        serverCoordinator?.restartServer()
+    }
+
     @objc private func selectFluidProvider() {
         guard modelManager.selectedProvider != .fluid else { return }
-        
+
         print("🔄 Switching engine to FluidAudio")
         serverCoordinator?.stopServer()
         modelManager.selectProvider(.fluid)
@@ -782,11 +800,9 @@ final class MenuBarService: ObservableObject {
     }
 
     @objc private func confirmDeleteDownloadedFluid(_: NSMenuItem) {
-        let modelName = FluidTranscriptionService.defaultModel.displayName
-
         let alert = NSAlert()
-        alert.messageText = "Delete \"\(modelName)\"?"
-        alert.informativeText = "The FluidAudio model cache will be removed. It will be re-downloaded automatically the next time you use it."
+        alert.messageText = "Delete FluidAudio models?"
+        alert.informativeText = "All cached FluidAudio model files (Parakeet and Nemotron) will be removed. They will be re-downloaded automatically the next time they are used."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
