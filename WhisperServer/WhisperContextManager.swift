@@ -2,6 +2,49 @@ import Foundation
 import Darwin
 import whisper
 
+/// Small deterministic state machine for the shared Whisper context lifecycle.
+/// Kept separate from timers and whisper.cpp calls so lifecycle behavior can be unit tested.
+struct WhisperContextLifecycleState {
+    private(set) var activeUseCount = 0
+    private(set) var pendingFree = false
+
+    mutating func acquire() {
+        activeUseCount += 1
+    }
+
+    /// Returns true when an inactivity timeout may release the shared context now.
+    func canReleaseForInactivity() -> Bool {
+        activeUseCount == 0
+    }
+
+    /// Requests a model reinitialization.
+    /// - Returns: true if the context may be freed immediately; false if freeing must be deferred.
+    mutating func requestReinitialization() -> Bool {
+        guard activeUseCount > 0 else {
+            return true
+        }
+
+        pendingFree = true
+        return false
+    }
+
+    /// Releases one active lease.
+    /// - Returns: true when the final lease should perform a previously deferred free.
+    mutating func release() -> Bool {
+        guard activeUseCount > 0 else {
+            return false
+        }
+
+        activeUseCount -= 1
+        guard activeUseCount == 0, pendingFree else {
+            return false
+        }
+
+        pendingFree = false
+        return true
+    }
+}
+
 /// Manages Whisper context lifecycle, memory usage, and Metal shader caching
 class WhisperContextManager {
     
@@ -10,6 +53,7 @@ class WhisperContextManager {
     /// Shared context and lock for thread-safe access
     private static var sharedContext: OpaquePointer?
     private static let lock = NSLock()
+    private static var lifecycleState = WhisperContextLifecycleState()
     private static let logQueue = DispatchQueue(label: "com.whisperserver.whisper.log", qos: .utility)
     private static var isLoggingConfigured = false
 
@@ -54,15 +98,52 @@ class WhisperContextManager {
     private static func checkAndReleaseResources() {
         let currentTime = Date()
         let elapsedTime = currentTime.timeIntervalSince(lastActivityTime)
-        
+
         if elapsedTime >= inactivityTimeout {
             lock.lock(); defer { lock.unlock() }
 
-            if let ctx = sharedContext {
-                whisper_free(ctx)
-                sharedContext = nil
-            }
+            // A transcription is still running on the context; freeing it now
+            // would be a use-after-free. releaseContext() restarts the timer.
+            guard lifecycleState.canReleaseForInactivity() else { return }
+
+            freeSharedContextUnsafe()
         }
+    }
+
+    /// Frees the shared context. This function MUST be called from within the lock.
+    private static func freeSharedContextUnsafe() {
+        if let ctx = sharedContext {
+            whisper_free(ctx)
+            sharedContext = nil
+        }
+    }
+
+    /// Acquires the shared context for a transcription operation and marks it as
+    /// in use so it cannot be freed until the matching releaseContext() call.
+    /// - Parameter modelPaths: The paths to the model files.
+    /// - Returns: An `OpaquePointer` to the Whisper context, or `nil` on failure.
+    static func acquireContext(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
+        lock.lock(); defer { lock.unlock() }
+
+        resetInactivityTimer()
+
+        guard let context = getOrCreateContextUnsafe(modelPaths: modelPaths) else {
+            return nil
+        }
+        lifecycleState.acquire()
+        return context
+    }
+
+    /// Releases a context previously obtained via acquireContext(). Performs any
+    /// free that was deferred while the context was in use and restarts the
+    /// inactivity countdown from the end of the operation.
+    static func releaseContext() {
+        lock.lock(); defer { lock.unlock() }
+
+        if lifecycleState.release() {
+            freeSharedContextUnsafe()
+        }
+        resetInactivityTimer()
     }
     
     /// Configures a persistent Metal shader cache
@@ -97,28 +178,19 @@ class WhisperContextManager {
         }
     }
     
-    /// Frees resources on application termination
+    /// Requests resource release on termination without invalidating an in-flight lease.
     static func cleanup() {
-        DispatchQueue.main.async {
-            inactivityTimer?.invalidate()
-            inactivityTimer = nil
-        }
-        
-        lock.lock(); defer { lock.unlock() }
-        if let ctx = sharedContext {
-            whisper_free(ctx)
-            sharedContext = nil
-        }
+        reinitializeContext()
     }
     
     /// Forcibly releases and reinitializes the Whisper context when the model changes
     static func reinitializeContext() {
         lock.lock(); defer { lock.unlock() }
 
-        // First, free the current context if it exists
-        if let ctx = sharedContext {
-            whisper_free(ctx)
-            sharedContext = nil
+        // Free the current context, or defer the free if a transcription is
+        // still running on it (the last releaseContext() will perform it).
+        if lifecycleState.requestReinitialization() {
+            freeSharedContextUnsafe()
         }
 
         // The context will be re-initialized on the next call to getOrCreateContext
@@ -130,14 +202,9 @@ class WhisperContextManager {
         }
     }
     
-    /// Forces release of the current Whisper context for memory isolation between chunks
-    /// This function MUST be called from within a lock.
+    /// Requests a context reset while respecting active leases and acquiring the manager lock.
     static func resetContextForChunk() {
-        // Release current context if it exists
-        if let ctx = sharedContext {
-            whisper_free(ctx)
-            sharedContext = nil
-        }
+        reinitializeContext()
     }
     
     /// Creates an isolated Whisper context for chunk processing that doesn't interfere with shared context

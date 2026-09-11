@@ -10,6 +10,30 @@ struct WhisperTranscriptionService {
     typealias TranscriptionSegment = WhisperSubtitleFormatter.TranscriptionSegment
     typealias ResponseFormat = WhisperSubtitleFormatter.ResponseFormat
     
+    /// Per-call dependencies keep tests independent of model files and global overrides.
+    /// The default implementation uses the real context manager and whisper.cpp.
+    struct ChunkDependencies {
+        typealias ModelPaths = (binPath: URL, encoderDir: URL)
+
+        let usesIsolatedContext: () -> Bool
+        let acquireSharedContext: (ModelPaths?) -> OpaquePointer?
+        let releaseSharedContext: () -> Void
+        let createIsolatedContext: (ModelPaths?) -> OpaquePointer?
+        let freeIsolatedContext: (OpaquePointer) -> Void
+        let runInference: (OpaquePointer, whisper_full_params, UnsafePointer<Float>?, Int32) -> Int32
+        let segmentCount: (OpaquePointer) -> Int32
+
+        static let live = ChunkDependencies(
+            usesIsolatedContext: { WhisperTranscriptionService.resetContextBetweenChunks },
+            acquireSharedContext: { WhisperContextManager.acquireContext(modelPaths: $0) },
+            releaseSharedContext: { WhisperContextManager.releaseContext() },
+            createIsolatedContext: { WhisperContextManager.createIsolatedContext(modelPaths: $0) },
+            freeIsolatedContext: { whisper_free($0) },
+            runInference: { whisper_full($0, $1, $2, $3) },
+            segmentCount: { whisper_full_n_segments($0) }
+        )
+    }
+
     // MARK: - Constants
     
     /// Notification name for when Metal is activated
@@ -56,7 +80,18 @@ struct WhisperTranscriptionService {
     /// Whether to reset Whisper context between chunks for memory isolation
     /// When true: Each chunk gets a completely isolated context (prevents state interference, uses more memory)
     /// When false: All chunks share the same context (faster, uses less memory, but may have state interference)
-    public static var resetContextBetweenChunks: Bool = false
+    public static var resetContextBetweenChunks: Bool {
+        get {
+            contextIsolationLock.lock(); defer { contextIsolationLock.unlock() }
+            return contextIsolationEnabled
+        }
+        set {
+            contextIsolationLock.lock(); defer { contextIsolationLock.unlock() }
+            contextIsolationEnabled = newValue
+        }
+    }
+    private static let contextIsolationLock = NSLock()
+    private static var contextIsolationEnabled = false
     
     /// Whether to use Voice Activity Detection for smart chunking
     public static var useVADChunking: Bool = true
@@ -155,7 +190,7 @@ struct WhisperTranscriptionService {
         let previousMaxDuration = maxChunkDuration
         let previousOverlap = chunkOverlap
         
-        maxChunkDuration = max(10.0, maxDuration) // Minimum 10s for traditional chunking
+        maxChunkDuration = max(10.0, maxDuration) // Minimum 10s for traditional chunks
         chunkOverlap = max(0.0, overlap)
         
         // Only log if values actually changed
@@ -451,33 +486,38 @@ struct WhisperTranscriptionService {
     }
     
     /// Transcribes a single audio chunk
-    private static func transcribeChunk(_ samples: [Float],
-                                       language: String?,
-                                       prompt: String?,
-                                       modelPaths: (binPath: URL, encoderDir: URL)?) -> String? {
+    static func transcribeChunk(_ samples: [Float],
+                                language: String?,
+                                prompt: String?,
+                                modelPaths: (binPath: URL, encoderDir: URL)?,
+                                dependencies: ChunkDependencies = .live) -> String? {
 
-        // Get context for this chunk
+        // Snapshot ownership before acquisition. A settings change during inference
+        // must not switch a shared lease to isolated cleanup (or vice versa).
+        let usesIsolatedContext = dependencies.usesIsolatedContext()
         let context: OpaquePointer?
-        if resetContextBetweenChunks {
-            context = WhisperContextManager.createIsolatedContext(modelPaths: modelPaths)
+        if usesIsolatedContext {
+            context = dependencies.createIsolatedContext(modelPaths)
         } else {
-            context = WhisperContextManager.getOrCreateContext(modelPaths: modelPaths)
+            context = dependencies.acquireSharedContext(modelPaths)
         }
         guard let ctx = context else { return nil }
-        
+
         defer {
-            // Clean up isolated context
-            if resetContextBetweenChunks, let ctx = context {
-                whisper_free(ctx)
+            if usesIsolatedContext {
+                // Clean up isolated context
+                dependencies.freeIsolatedContext(ctx)
+            } else {
+                dependencies.releaseSharedContext()
             }
         }
-        
+
         // Configure parameters
-        var (params, langPtr, promptPtr) = makeWhisperParams(printTimestamps: false, language: language, prompt: prompt)
+        let (params, langPtr, promptPtr) = makeWhisperParams(printTimestamps: false, language: language, prompt: prompt)
 
         // Process the audio
         let result = samples.withUnsafeBufferPointer { buffer in
-            whisper_full(ctx, params, buffer.baseAddress, Int32(buffer.count))
+            dependencies.runInference(ctx, params, buffer.baseAddress, Int32(buffer.count))
         }
 
         // Free temporary C-strings
@@ -490,7 +530,7 @@ struct WhisperTranscriptionService {
         }
         
         // Extract transcription
-        let segmentCount = whisper_full_n_segments(ctx)
+        let segmentCount = dependencies.segmentCount(ctx)
         var transcription = ""
         
         for i in 0..<segmentCount {
@@ -506,34 +546,39 @@ struct WhisperTranscriptionService {
     }
     
     /// Transcribes a single audio chunk and returns segments with timestamps
-    private static func transcribeChunkToSegments(_ samples: [Float], 
-                                                 chunkStartTime: Double,
-                                                 language: String?, 
-                                                 prompt: String?, 
-                                                 modelPaths: (binPath: URL, encoderDir: URL)?) -> [TranscriptionSegment]? {
-        
-        // Get context for this chunk
+    static func transcribeChunkToSegments(_ samples: [Float],
+                                          chunkStartTime: Double,
+                                          language: String?,
+                                          prompt: String?,
+                                          modelPaths: (binPath: URL, encoderDir: URL)?,
+                                          dependencies: ChunkDependencies = .live) -> [TranscriptionSegment]? {
+
+        // Snapshot ownership before acquisition. A settings change during inference
+        // must not switch a shared lease to isolated cleanup (or vice versa).
+        let usesIsolatedContext = dependencies.usesIsolatedContext()
         let context: OpaquePointer?
-        if resetContextBetweenChunks {
-            context = WhisperContextManager.createIsolatedContext(modelPaths: modelPaths)
+        if usesIsolatedContext {
+            context = dependencies.createIsolatedContext(modelPaths)
         } else {
-            context = WhisperContextManager.getOrCreateContext(modelPaths: modelPaths)
+            context = dependencies.acquireSharedContext(modelPaths)
         }
         guard let ctx = context else { return nil }
-        
+
         defer {
-            // Clean up isolated context
-            if resetContextBetweenChunks, let ctx = context {
-                whisper_free(ctx)
+            if usesIsolatedContext {
+                // Clean up isolated context
+                dependencies.freeIsolatedContext(ctx)
+            } else {
+                dependencies.releaseSharedContext()
             }
         }
-        
+
         // Configure parameters
-        var (params, langPtr, promptPtr) = makeWhisperParams(printTimestamps: true, language: language, prompt: prompt)
+        let (params, langPtr, promptPtr) = makeWhisperParams(printTimestamps: true, language: language, prompt: prompt)
 
         // Process the audio
         let result = samples.withUnsafeBufferPointer { buffer in
-            whisper_full(ctx, params, buffer.baseAddress, Int32(buffer.count))
+            dependencies.runInference(ctx, params, buffer.baseAddress, Int32(buffer.count))
         }
 
         // Free temporary C-strings
@@ -546,7 +591,7 @@ struct WhisperTranscriptionService {
         }
         
         // Extract segments with timestamps
-        let segmentCount = whisper_full_n_segments(ctx)
+        let segmentCount = dependencies.segmentCount(ctx)
         var segments = [TranscriptionSegment]()
         
         for i in 0..<segmentCount {
