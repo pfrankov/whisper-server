@@ -121,7 +121,7 @@ LC_ALL=C sed -i '' -E "s/(MARKETING_VERSION = )[0-9]+\.[0-9]+\.[0-9]+;/\\1$NEW_V
 # Ensure Info.plist uses $(MARKETING_VERSION) as CFBundleShortVersionString
 PLIST_SHORT_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST_PATH" 2>/dev/null || echo "")
 if [ "$PLIST_SHORT_VER" != '$(MARKETING_VERSION)' ]; then
-  echo "Setting Info.plist CFBundleShortVersionString to $(MARKETING_VERSION)"
+  echo 'Setting Info.plist CFBundleShortVersionString to $(MARKETING_VERSION)'
   /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString $(MARKETING_VERSION)' "$PLIST_PATH"
 fi
 
@@ -140,13 +140,20 @@ else
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT_BUILD" "$PLIST_PATH"
 fi
 
-git -C "$REPO_ROOT" add "$PLIST_PATH"
-echo "Review and commit the updated project files (Info.plist and project.pbxproj) manually."
+# Xcode generates CFBundleVersion from CURRENT_PROJECT_VERSION, so keep the
+# project setting and the source plist synchronized.
+FINAL_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST_PATH")
+echo "Updating CURRENT_PROJECT_VERSION in project to $FINAL_BUILD"
+LC_ALL=C sed -i '' -E "s/(CURRENT_PROJECT_VERSION = )[0-9]+;/\\1$FINAL_BUILD;/g" "$PBXPROJ_PATH"
 
-# Tagging (tags are created on current HEAD; ensure you've committed changes before tagging)
+git -C "$REPO_ROOT" add "$PLIST_PATH" "$PBXPROJ_PATH"
+echo "Staged Info.plist and project.pbxproj."
+
+# With --tag, commit the staged version files first so the tag contains them.
 if [ "$DO_TAG" = true ]; then
-  TAG_NAME="v$NEW_VERSION"
-  echo "Creating tag $TAG_NAME on current HEAD (ensure you've committed)."
+  TAG_NAME="$NEW_VERSION"
+  git -C "$REPO_ROOT" commit -m "Release $NEW_VERSION"
+  echo "Creating tag $TAG_NAME on the release commit."
   git -C "$REPO_ROOT" tag -a "$TAG_NAME" -m "Release $TAG_NAME"
   if [ "$DO_PUSH" = true ]; then
     echo "Pushing tag $TAG_NAME to origin"

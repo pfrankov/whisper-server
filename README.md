@@ -31,9 +31,8 @@ It exposes a local HTTP server compatible with the OpenAI Whisper API for audio 
 
 ### Download from GitHub Releases
 1. Go to the [Releases page](https://github.com/pfrankov/whisper-server/releases).
-2. Download the latest `.dmg` file.
-3. Open the `.dmg` file.
-4. Drag WhisperServer to your Applications folder.
+2. Download `WhisperServer.zip` from the latest release.
+3. Unzip it and move `WhisperServer.app` to your Applications folder.
 
 ### 🚨 First launch
 This app is not signed by Apple. To open it the first time:
@@ -68,12 +67,16 @@ curl -X POST http://localhost:12017/v1/audio/transcriptions \
 | stream           | Enable streaming (SSE or chunked)  | true, false                         | no       |
 
 ### Models
-| Model | Relative speed | Quality |
+| Model | Languages | Best for |
 |--------------------------|----------------|---------------------------------------|
-| `parakeet-tdt-0.6b-v3`   | Fastest        | Medium                                |
-| `tiny-q5_1`              | Fast           | Good (English), Low (other languages) |
-| `large-v3-turbo-q5_0`    | Slow           | Medium–Good                           |
-| `medium-q5_0`            | Slowest        | Good                                  |
+| `parakeet-tdt-0.6b-v3` | English | Fast batch transcription and diarization |
+| `nemotron-speech-streaming-en-0.6b` | English | Low-latency streaming |
+| `nemotron-3.5-asr-streaming-multilingual-0.6b` | Multilingual | Low-latency multilingual streaming |
+| `tiny-q5_1` | Multilingual | Fast Whisper transcription |
+| `large-v3-turbo-q5_0` | Multilingual | Balanced Whisper quality and speed |
+| `medium-q5_0` | Multilingual | Higher-quality Whisper transcription |
+
+Models are downloaded on first use and cached locally. For the multilingual Nemotron model, pass `language` as an ISO 639-1 code such as `en`, `de`, or `ru`; locale forms such as `de-DE` are also accepted. If omitted, the model uses automatic language selection. The English Nemotron model always transcribes as English.
 
 ## Response formats
 
