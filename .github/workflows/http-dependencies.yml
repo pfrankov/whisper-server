@@ -1,0 +1,30 @@
+name: HTTP dependency regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  http-dependencies:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Verify toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Resolve the exact app package graph
+        run: |
+          xcodebuild -resolvePackageDependencies -project WhisperServer.xcodeproj -scheme WhisperServer -onlyUsePackageVersionsFromResolvedFile
+          git diff --exit-code -- WhisperServer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+      - name: Test HTTP decoder, decompression and Vapor transport
+        run: python3 scripts/test_http_dependencies.py
