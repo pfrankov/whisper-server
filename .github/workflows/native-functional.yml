@@ -1,0 +1,155 @@
+name: Native candidate functional QA
+
+on:
+  push:
+    branches: [qa/native-functional-20261002]
+    paths: [.github/workflows/native-functional.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  native-functional:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Download existing candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: 11226973248
+          run-id: 37007829188
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate
+          merge-multiple: true
+      - name: Verify unchanged candidate and exercise ordinary API requests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          export QA_ROOT="$RUNNER_TEMP/native-functional"
+          mkdir -p "$QA_ROOT/evidence"
+          cd "$RUNNER_TEMP/candidate"
+          echo '4a2590c72440f08a61c6e5d7a94d14d0a5dd56b216c60fbc90069e29b7c1ba2b  WhisperServer.zip' | shasum -a 256 -c -
+          ditto -x -k WhisperServer.zip "$QA_ROOT"
+          codesign --verify --deep --strict "$QA_ROOT/WhisperServer.app"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, plistlib, re, subprocess, time
+          root = pathlib.Path(os.environ['QA_ROOT'])
+          evidence = root / 'evidence'
+          app = root / 'WhisperServer.app'
+          exe = app / 'Contents/MacOS/WhisperServer'
+          proof = json.loads(pathlib.Path('build-provenance.json').read_text())
+          assert proof['app_commit'] == '6c80bec646a19c884f842fc2ebf2f005dc5c086a'
+          assert proof['architecture'] == 'arm64'
+          assert proof['executable_sha256'] == '276d20b78eb041bab9bd1682bb1f1a086b02fe2d2d8d3e4d77c37c23f8b1cb4e'
+          assert proof['whisper_framework_sha256'] == '4e882c9cd97cf55bb1ac47522094307ea7c708247e2251bd8de9444565e2a314'
+          assert hashlib.sha256(exe.read_bytes()).hexdigest() == proof['executable_sha256']
+          framework = app / 'Contents/Frameworks/whisper.framework/whisper'
+          assert hashlib.sha256(framework.read_bytes()).hexdigest() == proof['whisper_framework_sha256']
+          assert next(p for p in proof['packages'] if p['identity'] == 'swift-nio-ssl')['state']['version'] == '2.34.0'
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          assert info['CFBundleShortVersionString'] == '2.9.1' and info['CFBundleVersion'] == '11'
+          assert subprocess.check_output(['lipo', '-archs', str(exe)], text=True).strip() == 'arm64'
+          # Use only an already installed system voice, never microphone input.
+          voices = subprocess.check_output(['/usr/bin/say', '-v', '?'], text=True)
+          voice = next(line.split('en_US')[0].strip() for line in voices.splitlines() if 'en_US' in line)
+          audio = root / 'sample.wav'
+          subprocess.run(['/usr/bin/say', '-v', voice, '-r', '140', '-o', str(root / 'sample.aiff'), 'The quick brown fox jumps over the lazy dog. Today is a good day to test speech recognition.'], check=True, timeout=60)
+          subprocess.run(['/usr/bin/afconvert', '-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1', str(root / 'sample.aiff'), str(audio)], check=True, timeout=60)
+          assert audio.stat().st_size > 1000
+          results = {'candidate': proof['app_commit'], 'checks': [], 'voice': voice, 'scope': 'Ordinary loopback requests without token; LAN authentication and security cases untested'}
+          def record(name, **details):
+              results['checks'].append({'name': name, **details})
+              (evidence / 'results.json').write_text(json.dumps(results, indent=2))
+              print(name, details, flush=True)
+          record('candidate-integrity', passed=True)
+          def listeners():
+              status = subprocess.run(['lsof', '-nP', '-iTCP:12017', '-sTCP:LISTEN', '-Fpn'], capture_output=True, text=True, timeout=10)
+              assert status.returncode in [0, 1]
+              return status.stdout.splitlines()
+          assert not listeners(), 'Port 12017 already has a listener'
+          log = (root / 'app.log').open('w')
+          process = subprocess.Popen([str(exe)], stdout=log, stderr=subprocess.STDOUT)
+          try:
+              deadline = time.monotonic() + 120
+              while time.monotonic() < deadline:
+                  assert process.poll() is None, 'App exited during startup'
+                  ready = subprocess.run(['curl', '--silent', '--fail', '--max-time', '2', 'http://localhost:12017/v1/models'], capture_output=True, text=True)
+                  if ready.returncode == 0:
+                      break
+                  time.sleep(2)
+              else:
+                  raise AssertionError('Local server did not become ready within two minutes')
+              listener = listeners()
+              assert [line for line in listener if line.startswith('p')] == ['p' + str(process.pid)]
+              addresses = [line[1:] for line in listener if line.startswith('n')]
+              assert addresses and all(address in ['127.0.0.1:12017', '[::1]:12017'] for address in addresses)
+              record('candidate-loopback-listener', passed=True, addresses=addresses)
+              models = json.loads(ready.stdout)
+              assert models['object'] == 'list'
+              tiny = next(m for m in models['data'] if m['id'] == 'tiny-q5_1')
+              assert tiny['default'] and tiny['supports_streaming']
+              (evidence / 'models.json').write_text(ready.stdout)
+              record('models', passed=True, count=len(models['data']))
+              for mode in ['json', 'text', 'srt', 'vtt', 'verbose_json', 'sse', 'chunked']:
+                  body = evidence / (mode + '.body')
+                  headers = evidence / (mode + '.headers')
+                  fmt = 'text' if mode in ['sse', 'chunked'] else mode
+                  args = ['curl', '--silent', '--show-error', '--max-time', '600' if mode == 'json' else '120', '--dump-header', str(headers), '--output', str(body), '--write-out', '%{http_code}', '-F', 'file=@' + str(audio), '-F', 'model=tiny-q5_1', '-F', 'language=en', '-F', 'response_format=' + fmt]
+                  if mode in ['sse', 'chunked']:
+                      args += ['-F', 'stream=true', '--no-buffer']
+                  if mode == 'sse':
+                      args += ['-H', 'Accept: text/event-stream']
+                  args += ['http://localhost:12017/v1/audio/transcriptions']
+                  start = time.monotonic()
+                  response = subprocess.run(args, capture_output=True, text=True, timeout=610 if mode == 'json' else 130)
+                  assert response.returncode == 0, (mode, 'curl failed', response.returncode)
+                  text = body.read_text()
+                  header = headers.read_text().lower()
+                  record(mode, status=response.stdout, seconds=round(time.monotonic()-start, 2), bytes=body.stat().st_size)
+                  assert response.stdout == '200', (mode, response.stdout)
+                  assert text.strip(), (mode, 'empty response')
+                  content_type = {'json': 'application/json', 'verbose_json': 'application/json', 'text': 'text/plain', 'srt': 'application/x-subrip', 'vtt': 'text/vtt', 'sse': 'text/event-stream', 'chunked': 'text/plain'}[mode]
+                  assert ('content-type: ' + content_type) in header, (mode, 'Unexpected content type')
+                  if mode in ['json', 'verbose_json']:
+                      parsed = json.loads(text)
+                      transcript = parsed['text']
+                      if mode == 'verbose_json':
+                          assert parsed['segments'] and all(s['end'] >= s['start'] >= 0 and s['text'].strip() for s in parsed['segments'])
+                  else:
+                      transcript = text
+                  assert len(set(re.findall(r'[a-z]+', transcript.lower())) & {'quick', 'brown', 'fox', 'lazy', 'dog', 'speech', 'recognition'}) >= 3, (mode, 'Expected speech content missing')
+                  if mode == 'srt':
+                      assert re.search(r'\d{2}:\d{2}:\d{2},\d{3} --> ', text)
+                  if mode == 'vtt':
+                      assert text.startswith('WEBVTT') and ' --> ' in text
+                  if mode == 'sse':
+                      assert 'content-type: text/event-stream' in header and 'event: end' in text and 'data:' in text
+                      assert text.count('event: end') == 1 and text.rstrip().endswith('event: end\ndata:')
+                  if mode == 'chunked':
+                      assert 'transfer-encoding: chunked' in header and 'text/event-stream' not in header
+                  results['checks'][-1]['passed'] = True
+                  (evidence / 'results.json').write_text(json.dumps(results, indent=2))
+                  assert process.poll() is None, 'App exited after request'
+                  subprocess.run(['curl', '--silent', '--fail', '--max-time', '5', '--output', '/dev/null', 'http://localhost:12017/v1/models'], check=True, timeout=10)
+              subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+              assert hashlib.sha256(exe.read_bytes()).hexdigest() == proof['executable_sha256']
+              record('unchanged-after-requests', passed=True)
+          finally:
+              process.terminate()
+              try:
+                  process.wait(timeout=20)
+              except subprocess.TimeoutExpired:
+                  process.kill()
+                  process.wait(timeout=10)
+              log.close()
+          PY
+      - name: Save functional QA evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-functional-evidence
+          path: ${{ runner.temp }}/native-functional/evidence/
+          if-no-files-found: warn
+          retention-days: 7
