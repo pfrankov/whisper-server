@@ -1,0 +1,94 @@
+name: Parakeet model selection
+
+on:
+  pull_request:
+    paths:
+      - 'WhisperServer/**'
+      - 'WhisperServerTests/**'
+      - 'WhisperServer.xcodeproj/**'
+      - 'test_api.sh'
+      - 'scripts/test_parakeet_native.py'
+      - '.github/workflows/parakeet-models.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-parakeet:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      WHISPER_REVISION: 1da4dc82fa7996d4edda05890dca65aeceaafd6d
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set QA directory
+        run: echo "QA_ROOT=$RUNNER_TEMP/parakeet-qa" >> "$GITHUB_ENV"
+      - name: Build pinned macOS Whisper SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          mkdir -p "$QA_ROOT/evidence"
+          xcodebuild -version | tee "$QA_ROOT/evidence/xcode.txt"
+          git rev-parse HEAD > "$QA_ROOT/evidence/head.txt"
+          cp WhisperServer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved "$QA_ROOT/evidence/Package.resolved"
+          git clone --filter=blob:none --no-checkout https://github.com/ggml-org/whisper.cpp.git "$QA_ROOT/whisper.cpp"
+          cd "$QA_ROOT/whisper.cpp"
+          git checkout --detach "$WHISPER_REVISION"
+          test "$(git rev-parse HEAD)" = "$WHISPER_REVISION"
+          # Reuse upstream's helpers and macOS build, omitting its unrelated mobile builds.
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('build-xcframework.sh').read_text()
+          helpers = source.split('echo "Building for iOS simulator..."')[0]
+          macos = source.split('echo "Building for macOS..."')[1].split('echo "Building for visionOS..."')[0]
+          Path('build-macos-qa.sh').write_text(helpers + macos + '''
+          setup_framework_structure "build-macos" ${MACOS_MIN_OS_VERSION} "macos"
+          combine_static_libraries "build-macos" "Release" "macos" "false"
+          xcodebuild -create-xcframework -framework "$PWD/build-macos/framework/whisper.framework" -output "$PWD/build-apple/whisper.xcframework"
+          ''')
+          PY
+          bash build-macos-qa.sh 2>&1 | tee "$QA_ROOT/evidence/sdk-build.log"
+          shasum -a 256 build-apple/whisper.xcframework/macos-arm64_x86_64/whisper.framework/whisper | tee "$QA_ROOT/evidence/sdk-sha256.txt"
+      - name: Prepare synthetic audio and local build paths
+        run: python3 scripts/test_parakeet_native.py prepare
+      - name: Native unit and model tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild test -project WhisperServer.xcodeproj -scheme WhisperServer \
+            -destination 'platform=macOS,arch=arm64' -derivedDataPath "$QA_ROOT/DerivedData" \
+            -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
+            -parallel-testing-enabled NO -only-testing:WhisperServerTests \
+            -resultBundlePath "$QA_ROOT/evidence/tests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_ENTITLEMENTS= \
+            2>&1 | tee "$QA_ROOT/evidence/xcode-test.log"
+          cmp "$QA_ROOT/evidence/Package.resolved" WhisperServer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+      - name: Ordinary Debug Parakeet API scenarios
+        run: python3 scripts/test_parakeet_native.py api Debug
+      - name: Build Release app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild build -project WhisperServer.xcodeproj -scheme WhisperServer \
+            -configuration Release -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$QA_ROOT/DerivedData" \
+            -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_ENTITLEMENTS= \
+            2>&1 | tee "$QA_ROOT/evidence/release-build.log"
+          cmp "$QA_ROOT/evidence/Package.resolved" WhisperServer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          echo 'Release build passed; package lock unchanged. Unsigned QA app, not a distribution artifact.'
+      - name: Ordinary Release Parakeet API scenarios
+        run: python3 scripts/test_parakeet_native.py api Release
+      - name: Save evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: parakeet-native-evidence
+          path: ${{ runner.temp }}/parakeet-qa/evidence/
+          if-no-files-found: warn
+          retention-days: 7

@@ -63,11 +63,13 @@ final class NemotronCacheTests: XCTestCase {
 
     func testFluidDeletionRemovesDownloaderCachesAndPreservesUnrelatedFiles() throws {
         let parakeet = directory.appendingPathComponent(AsrModels.defaultCacheDirectory(for: .v3).lastPathComponent)
+        let parakeetV2 = directory.appendingPathComponent(AsrModels.defaultCacheDirectory(for: .v2).lastPathComponent)
         let downloadedFiles = try [
             writeFixture(in: englishDirectory),
             writeFixture(in: multilingualDirectory.appendingPathComponent("latin/2240ms", isDirectory: true)),
             writeFixture(in: multilingualDirectory.appendingPathComponent("multilingual/2240ms", isDirectory: true)),
-            writeFixture(in: parakeet)
+            writeFixture(in: parakeet),
+            writeFixture(in: parakeetV2)
         ]
         let unrelatedFiles = try [
             writeFixture(in: directory.appendingPathComponent("nemotron-streaming-unrelated", isDirectory: true)),
@@ -78,7 +80,7 @@ final class NemotronCacheTests: XCTestCase {
         // Exercise the same filesystem operation called by the model-deletion menu action.
         for _ in 0..<2 {
             try ModelManager.deleteDownloadedFluidModelCaches(
-                parakeetDirectory: parakeet, nemotronBaseDirectory: directory
+                parakeetDirectories: FluidTranscriptionService.parakeetCacheDirectories(baseDirectory: directory), nemotronBaseDirectory: directory
             )
             for file in downloadedFiles {
                 XCTAssertFalse(fileManager.fileExists(atPath: file.path), "Cached model was not removed: \(file.path)")

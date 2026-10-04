@@ -34,7 +34,7 @@ final class MenuBarService: ObservableObject {
 
     // MARK: - Properties
 
-    private var statusItem: NSStatusItem?
+    private(set) var statusItem: NSStatusItem?
     private let modelManager: ModelManager
     private let settingsStore: SettingsStore
     private weak var serverCoordinator: ServerCoordinator?
