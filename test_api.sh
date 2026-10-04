@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SERVER_URL="http://localhost:12017"
-TEST_AUDIO="jfk.wav"
+TEST_AUDIO="${TEST_AUDIO:-jfk.wav}"
 
 # Colors for output
 RED='\033[0;31m'
