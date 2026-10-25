@@ -27,8 +27,8 @@ def inspect(bundle):
     run('codesign', '--verify', '--deep', '--strict', str(bundle))
     info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
     assert info['CFBundleIdentifier'] == 'pfrankov.WhisperServer'
-    assert info['CFBundleShortVersionString'] == '2.10.0'
-    assert info['CFBundleVersion'] == '11'
+    assert info['CFBundleShortVersionString'] == '2.10.1'
+    assert info['CFBundleVersion'] == '12'
     assert info['LSMinimumSystemVersion'] == '14.6'
     executable = bundle / 'Contents/MacOS/WhisperServer'
     framework = bundle / 'Contents/Frameworks/whisper.framework/whisper'
