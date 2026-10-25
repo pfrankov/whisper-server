@@ -126,7 +126,7 @@ final class ModelManager: @unchecked Sendable {
     
     /// Flags to prevent duplicate preparation per provider
     private var isPreparingWhisperModel: Bool = false
-    private var isPreparingFluidModel: Bool = false
+    private var fluidPreparationID: UUID?
 
     private let fileManager = FileManager.default
     private var modelsDirectory: URL?
@@ -143,7 +143,14 @@ final class ModelManager: @unchecked Sendable {
 
     // MARK: - Initialization
 
-    init() {
+    private let prepareFluidModel: (FluidTranscriptionService.ModelDescriptor) async throws -> Void
+
+    init(
+        automaticallyPrepareModels: Bool = true,
+        prepareFluidModel: @escaping (FluidTranscriptionService.ModelDescriptor) async throws -> Void = ModelManager.prepareFluidModel
+    ) {
+        self.prepareFluidModel = prepareFluidModel
+        suppressAutoPrepare = true
         let configuration = URLSessionConfiguration.default
         self.urlSession = URLSession(configuration: configuration, delegate: nil, delegateQueue: OperationQueue())
 
@@ -161,7 +168,8 @@ final class ModelManager: @unchecked Sendable {
             selectedProvider = .whisper
         }
         NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
-        checkAndPrepareSelectedModel()
+        suppressAutoPrepare = false
+        if automaticallyPrepareModels { checkAndPrepareSelectedModel() }
     }
 
     // MARK: - Public Methods
@@ -206,7 +214,7 @@ final class ModelManager: @unchecked Sendable {
         fluidPreparationTask = nil
 
         isPreparingWhisperModel = false
-        isPreparingFluidModel = false
+        fluidPreparationID = nil
 
         // Reset user defaults
         if let bundleID = Bundle.main.bundleIdentifier {
@@ -223,6 +231,7 @@ final class ModelManager: @unchecked Sendable {
 
         suppressAutoPrepare = true
         selectedModelID = nil
+        selectedFluidModelID = FluidTranscriptionService.defaultModel.id
         selectedProvider = .whisper
         suppressAutoPrepare = false
 
@@ -233,8 +242,7 @@ final class ModelManager: @unchecked Sendable {
         } else if let modelsDir = modelsDirectory {
             directoriesToRemove.append(modelsDir)
         }
-        let fluidDir = FluidTranscriptionService.cacheDirectory()
-        directoriesToRemove.append(fluidDir)
+        directoriesToRemove.append(contentsOf: FluidTranscriptionService.parakeetCacheDirectories())
 
         for directory in Set(directoriesToRemove) {
             if fileManager.fileExists(atPath: directory.path) {
@@ -566,10 +574,7 @@ final class ModelManager: @unchecked Sendable {
 
     /// Returns true if the FluidAudio cache directory exists and contains any entries.
     func isFluidModelDownloaded() -> Bool {
-        let dir = FluidTranscriptionService.cacheDirectory()
-        guard fileManager.fileExists(atPath: dir.path) else { return false }
-        let contents = (try? fileManager.contentsOfDirectory(atPath: dir.path)) ?? []
-        return !contents.isEmpty
+        FluidTranscriptionService.isParakeetModelDownloaded()
     }
 
     /// Removes the on-disk files for a bundled Whisper model (no effect on user-imported catalog entries).
@@ -615,16 +620,15 @@ final class ModelManager: @unchecked Sendable {
     /// Removes the FluidAudio model caches (Parakeet and Nemotron). Models re-download on next use.
     func deleteDownloadedFluidModel() throws {
         try Self.deleteDownloadedFluidModelCaches(
-            parakeetDirectory: FluidTranscriptionService.cacheDirectory(),
+            parakeetDirectories: FluidTranscriptionService.parakeetCacheDirectories(),
             nemotronBaseDirectory: NemotronTranscriptionService.cacheBaseDirectory()
         )
         NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
     }
 
     /// Keep filesystem work independent of model preparation and user preferences.
-    static func deleteDownloadedFluidModelCaches(parakeetDirectory: URL, nemotronBaseDirectory: URL) throws {
-        let directories = [
-            parakeetDirectory,
+    static func deleteDownloadedFluidModelCaches(parakeetDirectories: [URL], nemotronBaseDirectory: URL) throws {
+        let directories = parakeetDirectories + [
             NemotronTranscriptionService.cacheDirectory(for: .english, baseDirectory: nemotronBaseDirectory),
             NemotronTranscriptionService.cacheDirectory(for: .multilingual, baseDirectory: nemotronBaseDirectory)
         ]
@@ -638,65 +642,66 @@ final class ModelManager: @unchecked Sendable {
 
     // MARK: - Model Preparation (Checking & Downloading) - To be implemented
 
+    private static func prepareFluidModel(_ descriptor: FluidTranscriptionService.ModelDescriptor) async throws {
+        if let variant = NemotronTranscriptionService.variant(forModelID: descriptor.id) {
+            let baseDir = NemotronTranscriptionService.cacheBaseDirectory()
+            switch variant {
+            case .english:
+                try await ModelHub.download(NemotronChunkSize.ms2240.repo, to: baseDir)
+            case .multilingual:
+                _ = try await StreamingNemotronMultilingualAsrManager.downloadVariant(
+                    languageCode: "auto", chunkMs: 2240, to: baseDir)
+            }
+        } else {
+            _ = try await FluidTranscriptionService.loadParakeetModel(descriptor)
+        }
+    }
+
     func checkAndPrepareSelectedModel() {
+        let previousFluidTask = fluidPreparationTask
+        previousFluidTask?.cancel()
+        fluidPreparationID = nil
+
         if selectedProvider == .fluid {
             whisperPreparationTask?.cancel()
             whisperPreparationTask = nil
-            fluidPreparationTask?.cancel()
 
-            if isPreparingFluidModel { return }
-            isPreparingFluidModel = true
+            let preparationID = UUID()
+            fluidPreparationID = preparationID
             isModelReady = false
             currentStatus = "Preparing FluidAudio model..."
             downloadProgress = nil
 
-            let fluidModelID = selectedFluidModelID
+            let descriptor = selectedFluidModelDescriptor
             fluidPreparationTask = Task { [weak self] in
                 guard let self = self else { return }
+                // Let a cancelled download finish before touching either cache again.
+                await previousFluidTask?.value
                 do {
                     try Task.checkCancellation()
-                    if let variant = NemotronTranscriptionService.variant(forModelID: fluidModelID) {
-                        let baseDir = NemotronTranscriptionService.cacheBaseDirectory()
-                        switch variant {
-                        case .english:
-                            try await ModelHub.download(NemotronChunkSize.ms2240.repo, to: baseDir)
-                        case .multilingual:
-                            _ = try await StreamingNemotronMultilingualAsrManager.downloadVariant(
-                                languageCode: "auto", chunkMs: 2240, to: baseDir)
-                        }
-                    } else {
-                        let cacheDir = FluidTranscriptionService.cacheDirectory()
-                        do {
-                            try self.fileManager.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: nil)
-                        } catch {
-                            print("⚠️ Unable to ensure FluidAudio cache directory: \(error.localizedDescription)")
-                        }
-                        _ = try await AsrModels.downloadAndLoad(to: cacheDir)
-                    }
+                    try await self.prepareFluidModel(descriptor)
                     try Task.checkCancellation()
                     await MainActor.run {
+                        guard self.fluidPreparationID == preparationID else { return }
                         self.currentStatus = "FluidAudio model ready"
                         self.isModelReady = true
                         self.downloadProgress = nil
-                        self.isPreparingFluidModel = false
+                        self.fluidPreparationID = nil
+                        self.fluidPreparationTask = nil
                         NotificationCenter.default.post(name: .modelIsReady, object: self)
-                        self.fluidPreparationTask = nil
-                    }
-                } catch is CancellationError {
-                    await MainActor.run {
-                        self.isPreparingFluidModel = false
-                        self.downloadProgress = nil
-                        self.currentStatus = "Ready"
-                        self.fluidPreparationTask = nil
                     }
                 } catch {
+                    let cancelled = error is CancellationError || Task.isCancelled
                     await MainActor.run {
-                        self.currentStatus = "Error preparing FluidAudio model: \(error.localizedDescription)"
+                        guard self.fluidPreparationID == preparationID else { return }
                         self.isModelReady = false
                         self.downloadProgress = nil
-                        self.isPreparingFluidModel = false
-                        NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+                        self.fluidPreparationID = nil
                         self.fluidPreparationTask = nil
+                        self.currentStatus = cancelled ? "Ready" : "Error preparing FluidAudio model: \(error.localizedDescription)"
+                        if !cancelled {
+                            NotificationCenter.default.post(name: .modelPreparationFailed, object: self)
+                        }
                     }
                 }
             }

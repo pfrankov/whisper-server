@@ -69,12 +69,15 @@ curl -X POST http://localhost:12017/v1/audio/transcriptions \
 ### Models
 | Model | Languages | Best for |
 |--------------------------|----------------|---------------------------------------|
-| `parakeet-tdt-0.6b-v3` | English | Fast batch transcription and diarization |
+| `parakeet-tdt-0.6b-v3` | Multilingual (25 European languages) | Fast batch transcription and diarization |
+| `parakeet-tdt-0.6b-v2` | English | English-only batch transcription and diarization |
 | `nemotron-speech-streaming-en-0.6b` | English | Low-latency streaming |
 | `nemotron-3.5-asr-streaming-multilingual-0.6b` | Multilingual | Low-latency multilingual streaming |
 | `tiny-q5_1` | Multilingual | Fast Whisper transcription |
 | `large-v3-turbo-q5_0` | Multilingual | Balanced Whisper quality and speed |
 | `medium-q5_0` | Multilingual | Higher-quality Whisper transcription |
+
+Select Parakeet v2 in the menu or pass `model=parakeet-tdt-0.6b-v2`. Parakeet v3 remains the default Fluid model; `default` and `fluid-default` still resolve to v3. The two versions use separate caches.
 
 Models are downloaded on first use and cached locally. For the multilingual Nemotron model, pass `language` as an ISO 639-1 code such as `en`, `de`, or `ru`; locale forms such as `de-DE` are also accepted. If omitted, the model uses automatic language selection. The English Nemotron model always transcribes as English.
 
