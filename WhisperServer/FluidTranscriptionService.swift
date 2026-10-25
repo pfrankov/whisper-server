@@ -6,11 +6,13 @@ struct FluidTranscriptionService {
     struct ModelDescriptor {
         let id: String
         let displayName: String
+        let parakeetVersion: AsrModelVersion?
         private let matchingIdentifiers: Set<String>
 
-        init(id: String, displayName: String, aliases: [String] = []) {
+        init(id: String, displayName: String, parakeetVersion: AsrModelVersion? = nil, aliases: [String] = []) {
             self.id = id
             self.displayName = displayName
+            self.parakeetVersion = parakeetVersion
             var identifiers = Set<String>()
             identifiers.insert(id.lowercased())
             for alias in aliases {
@@ -66,7 +68,14 @@ struct FluidTranscriptionService {
         ModelDescriptor(
             id: "parakeet-tdt-0.6b-v3",
             displayName: "Parakeet TDT v3 (0.6B)",
+            parakeetVersion: .v3,
             aliases: ["default", "fluid-default", "parakeet-tdt-0.6b-v3-coreml"]
+        ),
+        ModelDescriptor(
+            id: "parakeet-tdt-0.6b-v2",
+            displayName: "Parakeet TDT v2 (0.6B, English)",
+            parakeetVersion: .v2,
+            aliases: ["parakeet-tdt-0.6b-v2-coreml"]
         ),
         ModelDescriptor(
             id: "nemotron-speech-streaming-en-0.6b",
@@ -102,7 +111,7 @@ struct FluidTranscriptionService {
         availableModelsInternal.map { $0.id }
     }
 
-    static func cacheDirectory(for version: AsrModelVersion = .v3) -> URL {
+    static func cacheDirectory(for version: AsrModelVersion = .v3, baseDirectory: URL? = nil) -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let bundleID = Bundle.main.bundleIdentifier ?? "WhisperServer"
         let base = appSupport
@@ -110,7 +119,27 @@ struct FluidTranscriptionService {
             .appendingPathComponent("Models", isDirectory: true)
             .appendingPathComponent("FluidAudio", isDirectory: true)
         let defaultLeaf = AsrModels.defaultCacheDirectory(for: version).lastPathComponent
-        return base.appendingPathComponent(defaultLeaf, isDirectory: true)
+        return (baseDirectory ?? base).appendingPathComponent(defaultLeaf, isDirectory: true)
+    }
+
+    static func parakeetCacheDirectories(baseDirectory: URL? = nil) -> [URL] {
+        availableModels.compactMap { $0.parakeetVersion }.map {
+            cacheDirectory(for: $0, baseDirectory: baseDirectory)
+        }
+    }
+
+    static func isParakeetModelDownloaded(baseDirectory: URL? = nil) -> Bool {
+        parakeetCacheDirectories(baseDirectory: baseDirectory).contains { directory in
+            let contents = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+            return !(contents?.isEmpty ?? true)
+        }
+    }
+
+    static func loadParakeetModel(_ model: ModelDescriptor) async throws -> AsrModels {
+        guard let version = model.parakeetVersion else {
+            throw ModelManager.ModelPreparationError.modelNotFound(model.id)
+        }
+        return try await AsrModels.downloadAndLoad(to: prepareCacheDirectory(version: version), version: version)
     }
 
     static func diarizerCacheDirectory() -> URL {
@@ -140,7 +169,7 @@ struct FluidTranscriptionService {
                 at: audioURL, language: language, variant: variant)
         }
         do {
-            let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
+            let models = try await loadParakeetModel(model)
             let asrManager = AsrManager(config: .default)
             try await asrManager.loadModels(models)
 
@@ -172,7 +201,7 @@ struct FluidTranscriptionService {
                 includeDiarization: includeDiarization)
         }
         do {
-            let models = try await AsrModels.downloadAndLoad(to: prepareCacheDirectory())
+            let models = try await loadParakeetModel(model)
             let asrManager = AsrManager(config: .default)
             try await asrManager.loadModels(models)
 
